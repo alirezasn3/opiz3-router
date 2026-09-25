@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router Status</title>
+  <meta name="description" content="Live status of the Orange Pi Zero 3 VPN router.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='9' width='14' height='5' rx='1.5' fill='%232a78d6'/%3E%3Cpath d='M5 7a4 4 0 0 1 6 0M3 5a7 7 0 0 1 10 0' stroke='%232a78d6' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>opiz3-router</h1>
+      <span class="muted" id="hostname"></span>
+    </div>
+    <div class="topbar-right">
+      <span class="conn" id="conn" data-state="connecting"><span class="conn-dot"></span><span id="conn-label">Connecting…</span></span>
+      <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 0 0 12z" fill="currentColor"/></svg></button>
+    </div>
+  </header>
+
+  <main>
+    <section class="tiles" aria-label="Summary">
+      <article class="tile" id="tile-vpn">
+        <h2 class="tile-label">VPN protection</h2>
+        <p class="tile-value"><span class="status" id="vpn-status"></span></p>
+        <p class="tile-sub" id="vpn-sub"></p>
+      </article>
+      <article class="tile">
+        <h2 class="tile-label">Internet uplinks</h2>
+        <ul class="tile-list" id="wan-list"></ul>
+      </article>
+      <article class="tile">
+        <h2 class="tile-label">Clients online</h2>
+        <p class="tile-value" id="clients-count">–</p>
+        <p class="tile-sub" id="clients-sub"></p>
+      </article>
+      <article class="tile">
+        <h2 class="tile-label">Router uptime</h2>
+        <p class="tile-value" id="uptime">–</p>
+        <p class="tile-sub" id="uptime-sub"></p>
+      </article>
+    </section>
+
+    <section class="card card-wide" aria-labelledby="traffic-title">
+      <div class="card-head">
+        <div>
+          <h2 id="traffic-title">VPN throughput</h2>
+          <p class="muted">Last 3 minutes, through <span id="wg-name">wg0</span></p>
+        </div>
+        <div class="hero">
+          <span class="hero-value" id="hero-rx">–</span>
+          <span class="muted">download now</span>
+        </div>
+      </div>
+      <ul class="legend" aria-label="Legend">
+        <li><span class="key key-rx"></span>Download <strong id="legend-rx">–</strong></li>
+        <li><span class="key key-tx"></span>Upload <strong id="legend-tx">–</strong></li>
+      </ul>
+      <div class="chart" id="chart">
+        <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+      </div>
+      <details class="table-view">
+        <summary>Show as table</summary>
+        <table>
+          <thead><tr><th>Time</th><th class="num">Download</th><th class="num">Upload</th></tr></thead>
+          <tbody id="traffic-table"></tbody>
+        </table>
+      </details>
+    </section>
+
+    <div class="grid">
+      <section class="card" aria-labelledby="wg-title">
+        <h2 id="wg-title">WireGuard</h2>
+        <dl class="facts" id="wg-facts"></dl>
+        <div id="wg-peers"></div>
+      </section>
+
+      <section class="card" aria-labelledby="modem-title">
+        <h2 id="modem-title">4G modem</h2>
+        <dl class="facts" id="modem-facts"></dl>
+      </section>
+
+      <section class="card" aria-labelledby="routing-title">
+        <h2 id="routing-title">Routing &amp; firewall</h2>
+        <ul class="checks" id="routing-checks"></ul>
+      </section>
+
+      <section class="card" aria-labelledby="system-title">
+        <h2 id="system-title">System</h2>
+        <dl class="facts" id="system-facts"></dl>
+        <div class="meter-row">
+          <span class="muted">Memory</span>
+          <div class="meter" id="mem-meter" role="meter" aria-label="Memory used" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+          <span class="num" id="mem-label"></span>
+        </div>
+      </section>
+    </div>
+
+    <section class="card card-wide" aria-labelledby="monitor-title">
+      <div class="card-title-row">
+        <h2 id="monitor-title">Display pages &amp; network discovery</h2>
+        <span class="muted" id="monitor-status"></span>
+      </div>
+      <p class="note" id="monitor-note" hidden></p>
+      <div class="mode-options" role="radiogroup" aria-label="What the display shows">
+        <button type="button" class="mode-option page-option" role="radio" data-page="status">
+          <span class="mode-head"><strong>Router status</strong><span class="mode-current">On display</span></span>
+          <span class="mode-desc">VPN state, uplinks, VPN traffic and clients.</span>
+        </button>
+        <button type="button" class="mode-option page-option" role="radio" data-page="channels">
+          <span class="mode-head"><strong>Wi-Fi channels</strong><span class="mode-current">On display</span></span>
+          <span class="mode-desc">How busy each 2.4 GHz channel is, heard by the USB Wi-Fi adapter, and the best channel for your access point.</span>
+        </button>
+        <button type="button" class="mode-option page-option" role="radio" data-page="network">
+          <span class="mode-head"><strong>Network scan</strong><span class="mode-current">On display</span></span>
+          <span class="mode-desc">Discover devices on the network connected through the Ethernet uplink, including their names when available.</span>
+        </button>
+      </div>
+      <div id="monitor-data" hidden>
+        <ul class="legend channel-legend" aria-label="Legend">
+          <li><span class="swatch swatch-own"></span>Your channel <strong id="own-channel">–</strong></li>
+          <li><span class="swatch swatch-best"></span>Best channel <strong id="best-channel">–</strong></li>
+        </ul>
+        <div class="channel-chart" id="channel-chart" role="img" aria-label="Networks per 2.4 GHz channel"></div>
+        <details class="table-view">
+          <summary id="networks-summary">Networks</summary>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Network</th><th class="num">Channel</th><th class="num">Signal</th></tr></thead>
+              <tbody id="networks-table"></tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="card card-wide" aria-labelledby="eth-title">
+      <div class="card-title-row">
+        <h2 id="eth-title">Ethernet port</h2>
+        <span class="muted" id="eth-status"></span>
+      </div>
+      <p class="note" id="eth-note" hidden></p>
+      <div class="pending" id="eth-pending" role="status" hidden>
+        <p id="eth-pending-text"></p>
+        <div class="pending-actions">
+          <button type="button" class="btn btn-primary" id="eth-keep">Keep</button>
+          <button type="button" class="btn" id="eth-undo">Undo</button>
+        </div>
+      </div>
+      <div class="mode-options" role="radiogroup" aria-labelledby="eth-title">
+        <button type="button" class="mode-option" role="radio" data-mode="uplink">
+          <span class="mode-head"><strong>Internet uplink</strong><span class="mode-current">Current</span></span>
+          <span class="mode-desc">Gets an address from the network it is plugged into and is used for internet, next to the 4G modem.</span>
+        </button>
+        <button type="button" class="mode-option" role="radio" data-mode="lan">
+          <span class="mode-head"><strong>LAN port</strong><span class="mode-current">Current</span></span>
+          <span class="mode-desc">Joins the router's LAN: devices plugged in get an address from the router and go through the VPN. The 4G modem is the only internet connection.</span>
+        </button>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="card" aria-labelledby="sms-title">
+        <div class="card-title-row">
+          <h2 id="sms-title">SMS</h2>
+          <span class="muted" id="sms-count"></span>
+        </div>
+        <p class="note" id="sms-note" hidden></p>
+        <ul class="feed" id="sms-list"></ul>
+      </section>
+
+      <section class="card" aria-labelledby="log-title">
+        <div class="card-title-row">
+          <h2 id="log-title">Notifications</h2>
+          <span class="muted" id="log-count"></span>
+        </div>
+        <ul class="feed" id="log-list"></ul>
+      </section>
+    </div>
+
+    <section class="card card-wide" aria-labelledby="clients-title">
+      <h2 id="clients-title">Clients</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>IP address</th><th>MAC address</th><th>Link</th><th class="num">Signal</th><th class="num">Connected</th><th class="num">Lease ends</th></tr></thead>
+          <tbody id="clients-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card card-wide" aria-labelledby="ifaces-title">
+      <h2 id="ifaces-title">Interfaces</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Interface</th><th>Role</th><th>State</th><th>Addresses</th><th class="num">Down</th><th class="num">Up</th><th class="num">Total down</th><th class="num">Total up</th></tr></thead>
+          <tbody id="ifaces-table"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,43 @@
+{
+  "interfaces": {
+    "ethernet": "end0",
+    "usb_modem": "enxd236db4ff68a",
+    "bridge": "br0",
+    "wireless": "wlan0"
+  },
+  "modem": {
+    "address": "192.168.0.1"
+  },
+  "wireguard": {
+    "interface": "wg0",
+    "table": 200,
+    "rule_priority": 1000,
+    "kill_switch": true
+  },
+  "panel": {
+    "enabled": true,
+    "listen": "172.16.0.1:80",
+    "allowed_interfaces": ["br0"],
+    "username": "admin",
+    "password": ""
+  },
+  "display": {
+    "spi_port": "SPI1.0",
+    "reset_pin": "GPIO72",
+    "dc_pin": "GPIO69",
+    "cs_pin": "GPIO70",
+    "backlight_pin": "GPIO227"
+  },
+  "monitor": {
+    "enabled": true,
+    "interface": "wlx10feed10c013",
+    "hostapd_config": "/etc/hostapd/hostapd.conf",
+    "hop_interval_ms": 1000
+  },
+  "network": {
+    "netplan_file": "/etc/netplan/opiz3-router.yaml",
+    "bridge_address": "172.16.0.1/12",
+    "dns": ["1.1.1.1", "8.8.8.8"]
+  },
+  "dhcp_leases_file": "/var/lib/misc/dnsmasq.leases"
+}
