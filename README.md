@@ -5,6 +5,11 @@ Wi-Fi access point, plus `end0` in server mode) are routed through a WireGuard
 tunnel (`wg0`) that runs over Ethernet or a D-Link DWR-910M 4G modem. Status is
 shown on an ST7789 SPI display, the onboard LEDs and a web panel.
 
+It runs on the stock Orange Pi Ubuntu image: `opiz3-router -install` makes
+every change the image needs. The bridge, firewall, NAT and VPN routing are
+held by [mini-net-man](https://github.com/alirezasn3/mini-net-man), which the
+router installs and configures through its HTTP API.
+
 ## Build
 
 You need Go 1.25 or newer on your computer. The binary is static, so nothing
@@ -17,162 +22,126 @@ make test
 
 `make build` stamps the git tag into the binary; check it with `opiz3-router -version`.
 
-## Prepare the Orange Pi Ubuntu image
+## Install on a device
 
-The two `orangepi-image-console*.sh` scripts let you edit an official Orange
-Pi Zero 3 Ubuntu image from your computer through a Linux VM. The image file
-must be accessible at the path you pass to the script from inside that VM.
-The computer needs Bash, `ssh` and `scp`; the VM needs Linux, `sudo`, loop
-device and mount support, and an SSH server.
+Start from an unmodified Orange Pi Zero 3 Ubuntu image, log in over SSH
+through Ethernet and run the commands on the device as root.
 
-From the directory containing the scripts, run:
+### 1. Put your WireGuard config in place
 
-```sh
-./orangepi-image-console.sh -h <vm-host> -u <vm-user> -i <image-path-in-vm>
-```
+Put your tunnel config at `/etc/wireguard/wg0.conf`.
+- Add `Table = off` to the `[Interface]` section: mini-net-man adds the routes
+  for LAN traffic itself.
+- Add `PersistentKeepalive = 25` to the `[Peer]` section: this prevents 4G/LTE
+  mobile carriers and NAT routers from dropping the connection during quiet
+  periods.
 
-The wrapper copies `orangepi-image-console-remote.sh` to the VM, opens an
-interactive SSH session with a terminal, and runs the helper with `sudo` (enter
-the VM's sudo password when prompted). The helper attaches the image with a
-loop device, mounts its root partition (partition 2 by default) at
-`/mnt/orangepi-image`, optionally mounts a separate boot partition there, and
-opens an interactive Bash shell inside the image with `chroot`. If the selected
-root partition is not present, it falls back to the first partition it finds.
-If ARM64 chroot support is missing, the helper installs it in the VM using
-`apt-get`; it also sets up the chroot's device, proc, sys, run and DNS mounts.
-It copies the QEMU emulator into the image and copies the VM's resolver
-configuration to the image's `/etc/resolv.conf` so commands in the chroot can
-use the network. On exit, it normally unmounts the image and detaches the loop
-device. Use `-r <partition-number>` to select a different root partition,
-`-b <partition-number>` for a separate boot partition, `-p <ssh-port>` for a
-non-default SSH port, or `-k` to keep the mounts and loop device after exiting.
-The helper mounts the image and provides a shell; it does not apply the
-configuration below automatically.
+### 2. Install
 
-The image preparation performed in that shell was:
-
-- Changed the APT source configuration to use Ubuntu's default source, then
-  ran `apt update` and installed WireGuard.
-- Enabled BBR congestion control and IPv4 forwarding.
-- Disabled NetworkManager.
-- Added `/etc/dnsmasq.d/br0.conf` and `/etc/hostapd/hostapd.conf`.
-- Added the required overlays to `/boot/orangepiEnv.txt`.
-- Removed the default netplan file and added
-  `/etc/netplan/opiz3-router.yaml`.
-
-The checked-in examples for these router settings are under `deploy/`. In
-particular, replace the example Wi-Fi credentials in the hostapd configuration
-before using it on a device.
-
-## Set up a new device
-
-These steps assume an Orange Pi Ubuntu or Debian image (or Armbian), with you
-logged in over SSH through Ethernet. Run the commands on the device as root.
-
-### 1. Enable the SPI display
-
-Add these two lines to `/boot/orangepiEnv.txt` (they are also in
-`deploy/boot/orangepi-env.txt`). Edit the file; do not replace it, because it
-holds the root filesystem UUID of your board. If there is already an
-`overlays=` line, add `spi1-cs0-spidev` to it, separated by a space.
-
-```
-overlay_prefix=sun50i-h616
-overlays=spi1-cs0-spidev
-```
-
-Reboot, then check that `/dev/spidev1.0` exists.
-
-### 2. Install packages
+Download the binary from the [latest release](https://github.com/alirezasn3/opiz3-router/releases/latest) onto the device, then run `-install` as root. That is the whole setup:
 
 ```sh
-apt update
-apt install wireguard-tools hostapd dnsmasq iptables iw netplan.io
+curl -fL -o /usr/local/bin/opiz3-router https://github.com/alirezasn3/opiz3-router/releases/latest/download/opiz3-router-linux-arm64
+chmod +x /usr/local/bin/opiz3-router
+sudo /usr/local/bin/opiz3-router -install
 ```
 
-### 3. Network (netplan)
+Each release also has a `checksums.txt` to verify the download against
+(`sha256sum -c`). To build from source instead, run `make build` on your
+computer and copy `opiz3-router` over.
 
-Pick one file from `deploy/netplan/` and copy it to
-`/etc/netplan/opiz3-router.yaml`. Move any other files in `/etc/netplan/` out of
-the way. With an `ap` file, the Ethernet port can later be switched between an
-uplink and a LAN port from the panel (see "Switching the Ethernet port" below),
-which needs the router's file to be the only one there.
+The service runs the binary in place, so keep it where it is; if you move it,
+run `-install` again.
 
-| File | end0 (Ethernet) | wlan0 (Wi-Fi) |
-|---|---|---|
-| `end0-client-wlan0-ap.yaml` | uplink (DHCP client) | access point |
-| `end0-server-wlan0-ap.yaml` | LAN port on `br0` | access point |
-| `end0-client-wlan0-sta.yaml` | uplink | joins another Wi-Fi |
-| `end0-server-wlan0-sta.yaml` | LAN port on `br0` | joins another Wi-Fi |
+`-install` needs the internet, can be run again at any time and only changes
+what is not already right. It:
 
-- The 4G modem shows up as `enx<MAC>`. Plug it in and run `ip link` to see
-  its name. If it is not `enxd236db4ff68a`, change it in the netplan file and
-  set `interfaces.usb_modem` in the config (step 7).
-- For the `sta` files, fill in `YOUR_WIFI_SSID` and `YOUR_WIFI_PASSWORD`.
-- The files use systemd-networkd. If your image manages `end0` with
-  NetworkManager, disable NetworkManager first.
+| Step | What it does |
+|---|---|
+| Config | Creates `/etc/opiz3-router/config.json` and, if there is none, a random Wi-Fi passphrase, which it prints at the end. |
+| Packages | `apt install`s whichever of `wireguard-tools hostapd dnsmasq iw netplan.io nftables` is missing. APT sources are left alone, and no service starts before it is configured. |
+| Display | Adds `overlay_prefix=sun50i-h616` and `overlays=spi1-cs0-spidev` to `/boot/orangepiEnv.txt`, keeping the other lines. This needs a reboot. |
+| Wi-Fi and DHCP | Writes `/etc/hostapd/hostapd.conf` (access point `wlan0`, bridged to `br0`) and `/etc/dnsmasq.d/br0.conf` (DHCP on `br0`), and enables both services. They wait for `br0`, which mini-net-man creates, and retry if it is late. |
+| WireGuard | Enables `wg-quick@wg0` and has systemd retry it if it fails at boot. |
+| mini-net-man | Downloads the latest release for the CPU into `/opt/mini-net-man`, checks it against the release's `checksums.txt`, installs its service, and creates an API token for the router, which it stores in `config.json`. |
+| Network | Moves the image's own files out of `/etc/netplan` (to `/etc/opiz3-router/netplan-backup/`), writes the small fallback `/etc/netplan/opiz3-router.yaml` (DHCP on `end0` and the modem), masks NetworkManager, and lets systemd-networkd take over. The SSH session may drop for a moment. |
+| Service | Installs and starts the `opiz3-router` service, after mini-net-man. |
 
-Stop systemd-networkd from deleting the router's routing rules. Without this,
-plugging in the modem (or any other link change) removes the VPN routing
-until the router notices and restores it a few seconds later:
+Then reboot if it says so, and check that `/dev/spidev1.0` exists.
+
+Options:
+
+- `-config /path/to/config.json` for a non-default config path.
+- `-mini-net-man /path/to/binary` to use a binary you already copied instead
+  of downloading.
+
+If mini-net-man was already installed before, its generated login is not shown
+again, so `-install` cannot make the token. It says so; make a token in
+mini-net-man's panel (Settings, API tokens) and put it in `config.json` as
+`mini_net_man.token`.
+
+The 4G modem shows up as `enx<MAC>`. Plug it in and run `ip link` to see its
+name. If it is not `enxd236db4ff68a`, set `interfaces.usb_modem` in the config
+and run `-install` again.
+
+### 3. Check it
 
 ```sh
-mkdir -p /etc/systemd/networkd.conf.d
-cp deploy/systemd/networkd-opiz3-router.conf /etc/systemd/networkd.conf.d/opiz3-router.conf
-systemctl restart systemd-networkd
+journalctl -u opiz3-router -f            # logs
+journalctl -u mini-net-man -f
 ```
 
-Apply with `netplan try`: it rolls the change back after two minutes unless you
-confirm, so a mistake can't lock you out. It may warn that bridge changes
-can't be fully reverted. Having a serial console or keyboard and HDMI at hand
-the first time helps.
+The screen shows the startup steps and then the status screen (see below). The
+panel is at `http://172.16.0.1/` from a device on the router's Wi-Fi.
 
-#### Using the Ethernet port for LAN devices
+`-uninstall` removes the `opiz3-router` service. It leaves what `-install` set
+up: mini-net-man keeps holding the bridge, firewall and routing.
 
-With an `end0-server-*` file, `end0` becomes a port of `br0` instead of an
-uplink. Devices plugged into it (directly or through a switch) are on the same
-LAN as the Wi-Fi clients: they get a `172.16.0.x` address from dnsmasq, go
-through the VPN and kill switch, and can open the panel. The 4G modem is then
-the only uplink: until the modem answers, the router restarts every 10 seconds
-waiting for it. The screen shows `ETH` as `LAN port` (gray while nothing is
-plugged in).
-
-Your SSH session over `end0` drops when you apply the change, because `end0`
-loses its own address. Connect to the router's Wi-Fi first and SSH to
-`172.16.0.1`, or use a serial console.
-
-### 4. Wi-Fi access point (hostapd)
-
-Skip this step with the `sta` netplan files.
+## Updating
 
 ```sh
-cp deploy/hostapd/hostapd.conf /etc/hostapd/hostapd.conf
-# set ssid= and wpa_passphrase= (8-63 characters)
-systemctl unmask hostapd
-systemctl enable --now hostapd
+opiz3-router -check-update      # is there a newer release?
+opiz3-router -update            # install the latest release and restart the service
+opiz3-router -update-to v1.0.1  # install that release; it may be older
+opiz3-router -rollback          # go back to the version before the last update
 ```
 
-### 5. DHCP for the LAN (dnsmasq)
+`-update` downloads the release's binary, checks it against `checksums.txt`,
+test-runs it (it has to report the release's version), and only then swaps it
+in. The previous binary stays next to it as `opiz3-router.old`, which is what
+`-rollback` uses. `-force` installs even when the version is already current,
+or when the running build is a local one that has no release version, and
+`-no-restart` leaves the restart to you. Run it as root.
+
+Updating replaces the program only. If a release's notes mention changes to the
+system setup, run `opiz3-router -install` once more.
+
+To try a build from your computer without a release: `make deploy HOST=root@<device-ip>`.
+
+## Releases
+
+Releases are built by GitHub Actions. To publish one, from a clean checkout of
+the commit to release:
 
 ```sh
-cp deploy/dnsmasq/br0.conf /etc/dnsmasq.d/br0.conf
-systemctl enable --now dnsmasq
+make release TAG=v1.0.1
 ```
 
-This hands out `172.16.0.2`–`172.16.0.99` on `br0`, with `1.1.1.1` and
-`8.8.8.8` as DNS servers. dnsmasq's own DNS server is turned off.
+This runs the tests, tags the commit and pushes the tag. The
+[release workflow](.github/workflows/release.yml) then tests it again, builds
+`opiz3-router-linux-arm64` with the tag as its version, and publishes a GitHub
+release with that binary and `checksums.txt` attached and notes
+generated from the commits. A tag with a dash (`v1.0.1-rc1`) is published as a
+pre-release, which `-update` does not pick as the latest.
+The asset names and `checksums.txt` are what `-update` looks for, so keep them
+as they are. The repository has to be public for it to download without a
+login.
 
-### 6. WireGuard
+## Config
 
-Put your tunnel config at `/etc/wireguard/wg0.conf`. Add `Table = off` to the
-`[Interface]` section: the router adds the routes for LAN traffic itself.
-You don't need to enable `wg-quick@wg0`; the router starts it.
-
-### 7. Config (optional)
-
-Every setting has a default that matches the reference hardware. To change
-some, copy `deploy/config.example.json` to `/etc/opiz3-router/config.json` and
-keep only the values you change. For example, to turn off the kill switch and
+Every setting has a default that matches the reference hardware, and
+`deploy/config.example.json` lists them all. `/etc/opiz3-router/config.json`
+only needs the values you change. For example, to turn off the kill switch and
 put a password on the panel:
 
 ```json
@@ -182,39 +151,9 @@ put a password on the panel:
 }
 ```
 
-### 8. Copy the binary and run it
-
-On your computer:
-
-```sh
-make build
-scp opiz3-router root@<device-ip>:/usr/local/bin/
-```
-
-On the device, run it in the foreground first to check that everything works
-(stop it with Ctrl-C):
-
-```sh
-/usr/local/bin/opiz3-router
-```
-
-The screen shows the startup steps and then the status screen (see below). The
-panel is at `http://172.16.0.1/`
-from a device on the router's Wi-Fi. Then install it as a service, which also
-enables and starts it:
-
-```sh
-/usr/local/bin/opiz3-router -install     # add -config /path/to/config.json for a non-default path
-journalctl -u opiz3-router -f            # logs
-```
-
-To update later, from your computer:
-
-```sh
-make deploy HOST=root@<device-ip>
-```
-
-`-uninstall` removes the service.
+The file holds the Wi-Fi passphrase and the mini-net-man token, so it is only
+readable by root. The panel's Wi-Fi card rewrites it (with every setting
+spelled out).
 
 ## Status screen
 
@@ -222,8 +161,8 @@ After startup the display shows:
 
 - **Banner:** the VPN state. Green `PROTECTED`; yellow `NO HANDSHAKE` (tunnel
   up but no recent handshake) or `VPN DOWN - BLOCKED` (kill switch holding LAN
-  traffic); red `UNPROTECTED` (VPN down, kill switch off), `LEAKING` or
-  `NOT ROUTED`.
+  traffic); red `UNPROTECTED` (VPN down, kill switch off) or `NOT ENFORCED`
+  (mini-net-man is not holding the router's setup).
 - **One row per link** with a colored dot: green is working, yellow needs
   attention, red is down, gray is off on purpose (unplugged modem, idle LAN port).
   - `ETH`: address, or `no cable`. In server mode it is a LAN port.
@@ -237,48 +176,34 @@ After startup the display shows:
   change, a VPN state change or `SMS from ...` (SMS stay for 5 minutes, others
   for 30 seconds), otherwise the panel address.
 
-## Network scan (Ethernet uplink)
+## Network discovery (Ethernet uplink)
 
-The display can scan the IPv4 subnet connected through `interfaces.ethernet`
+The router discovers devices on the IPv4 subnet connected through `interfaces.ethernet`
 (`end0` by default). It sends raw ARP requests on the Ethernet interface and
-collects replies with their MAC addresses. Names are tried in this order:
+collects replies with their MAC addresses. Names are resolved using:
 dnsmasq DHCP leases, reverse DNS, mDNS, LLMNR, and NetBIOS name service. If no
-name is available, the display falls back to the MAC manufacturer from the Wireshark `manuf` database embedded
-in the binary. The scan page can be selected in the panel's
-**Display pages & network discovery** card; the selection is remembered with
-the other display pages.
+name is available, it falls back to the MAC manufacturer from the Wireshark `manuf` database embedded
+in the binary. Discovered devices are displayed live in the web panel's **Network discovery** card.
 
-## Wi-Fi channels (USB Wi-Fi adapter)
+## LCD status display & power control
 
-A USB Wi-Fi adapter that supports monitor mode (`monitor.interface`, default
-`wlx10feed10c013`) shows how busy the 2.4 GHz channels are, so you can pick
-the best one for the access point.
+The ST7789 display is dedicated to a clean, focused **Status screen**:
+- Top banner: VPN protection status (Protected, Blocked, Unprotected, Leaking)
+- Uplinks: Ethernet (`ETH`) and 4G modem (`4G`) with signal meter
+- WireGuard tunnel (`VPN`): live throughput and handshake health
+- LAN clients (`BRIDGE`): online client count
+- Footer: recent notification or SMS alert
 
-- While the adapter is plugged in, the router puts it into monitor mode and
-  moves it through channels 1 to 13, listening on each for
-  `monitor.hop_interval_ms` (default 1000 ms, so a full pass takes about 13 s;
-  100 to 5000 allowed). Longer hears more beacons per visit; shorter notices
-  new networks sooner. Networks are forgotten 90 s after their last beacon. It is handed back in managed
-  mode when unplugged or when the router stops. `iw` must be installed, and
-  nothing else (NetworkManager, wpa_supplicant) may manage the adapter.
-- Only beacons are read: each network's name, channel and signal. A kernel
-  filter drops all other traffic, including anything sent by phones and
-  laptops, before it reaches the router.
-- The panel's **Display & Wi-Fi channels** card chooses what the display
-  shows: the router status or the channels page. The choice is remembered in
-  `/var/lib/opiz3-router/display-page`. The card also shows the channel chart
-  and the networks heard.
-- The channels page shows the 2.4 GHz spectrum like a Wi-Fi analyzer: each
-  network is a hump over the 22 MHz it occupies (its channel and two on either
-  side), as high as its signal is strong, against -40/-60/-80 dBm gridlines.
-  Your access point is blue and labelled "you"; the three strongest neighbours
-  get their own colors and names; the rest are gray. Under the axis, the best
-  channel's number is green, yours is blue, and a marker shows the channel
-  being listened to right now. The recommended channel is the least busy of
-  1, 6 and 11, the three that do not overlap. Notifications such as a new SMS
-  still show in the footer.
-- To use the recommendation, set `channel=` in `/etc/hostapd/hostapd.conf` and
-  run `systemctl restart hostapd`.
+The display backlight and rendering can be turned off or on directly from the web panel's **LCD display** card to save power when the router is running unattended.
+
+## Wi-Fi access point
+
+The panel's **Wi-Fi access point** card changes the network name, passphrase and
+channel, and the range of addresses dnsmasq hands out. Saving writes
+`config.json`, rewrites `hostapd.conf` and `br0.conf` and restarts what
+changed. Wi-Fi devices, including the one you use the panel from, reconnect
+within a few seconds. If a service does not restart with the new settings, the
+old ones are put back. Leave the passphrase empty to keep it.
 
 ## Switching the Ethernet port
 
@@ -288,16 +213,19 @@ uplink** (DHCP client, next to the 4G modem) and a **LAN port** on `br0`
 only uplink). The Wi-Fi access point stays as it is.
 
 - The router writes `network.netplan_file` (`/etc/netplan/opiz3-router.yaml`)
-  for the chosen mode, checks it with `netplan generate`, and runs
-  `netplan apply`. If that fails, the previous file is put back.
+  for the chosen mode (DHCP on `end0`, or nothing), runs `netplan apply`, and
+  has mini-net-man add `end0` to `br0` or take it out. The port leaves the
+  bridge before it asks for an address and joins it only after netplan has let
+  go. If a step fails, the previous setup is put back. mini-net-man remembers
+  the mode, so it survives a reboot.
 - Like `netplan try`, the switch must be kept within 90 seconds with the
   **Keep** button, or it is undone. If the switch cuts off the device you made
   it from (for example a laptop on the Ethernet port), reconnect over Wi-Fi to
   keep it, or wait and it goes back by itself.
 - Switching is only offered when `/etc/netplan` holds no other `.yaml` files,
   because netplan merges all of them and another file could undo the switch.
-  The panel says which files are in the way. On an existing setup, rename the
-  file you installed to `opiz3-router.yaml`.
+  The panel says which files are in the way. `-install` moves the image's own
+  files out of the way.
 - While switching from uplink to LAN port, the VPN moves to the 4G modem; the
   tunnel may pause for a few seconds.
 - Changes are only accepted from the panel page itself, opened by IP address,
@@ -307,37 +235,53 @@ only uplink). The Wi-Fi access point stays as it is.
 
 ## Routing and firewall
 
-- Traffic arriving on `br0` is looked up in table 200 (`ip rule iif br0 lookup 200`).
-  The router's own replies to LAN clients stay in the main table, so SSH and
-  the panel work from the LAN.
-- Table 200 has `default dev wg0`. With `wireguard.kill_switch` on (the
-  default) it also has `blackhole default metric 4096`: if `wg0` goes away, LAN
-  traffic is dropped instead of going out of the WAN unencrypted. With it off,
-  LAN traffic uses the WAN directly until the tunnel is back.
-- The `OPIZ3-INPUT` chain only allows the panel port on `panel.allowed_interfaces`
-  (and loopback). The `OPIZ3-FORWARD` chain drops new connections into the LAN
-  that did not start there, except port forwards (DNAT).
-- Traffic leaving every uplink (`end0`, the modem, `wlan0`), `wg0` and `br0` is
-  masqueraded.
-- The router checks the routing every 3 seconds, the firewall every 15 seconds
-  and both 2 seconds after any link change, and puts back anything that is
-  missing. The panel shows how often that happened and why; the log says
-  `guard: missing ...; restoring`.
-- These rules stay in place when the service stops, so the kill switch keeps
-  working. Check them with `ip rule`, `ip route show table 200` and
-  `iptables -S OPIZ3-INPUT`.
+The router describes what it needs to mini-net-man and keeps it there. Every
+item it manages has a comment starting with `opiz3-router:` in mini-net-man's
+panel; items without it are never touched. The router compares the two every
+30 seconds and puts back anything that was removed or edited. mini-net-man
+itself keeps its config in the kernel across restarts of the router, so all of
+this stays in place when the `opiz3-router` service stops.
+
+- **Bridge:** `br0` with the address `network.bridge_address`. `end0` is a port
+  of it in LAN-port mode; `wlan0` is joined by hostapd.
+- **Forwarding and tuning:** IP forwarding is on, and BBR (with `fq`, when the
+  kernel offers it) is the congestion control.
+- **VPN routing:** traffic arriving on `br0` is looked up in table 200 (rule
+  `iif br0 lookup 200`). The router's own replies to LAN clients stay in the
+  main table, so SSH and the panel work from the LAN. Table 200 has
+  `default dev wg0`.
+- **Kill switch** (`wireguard.kill_switch`, on by default): table 200 also has
+  `blackhole default metric 4096`, so if `wg0` goes away LAN traffic is dropped
+  instead of going out of the WAN unencrypted.
+- **Health check:** mini-net-man pings `wireguard.health_target` (`1.1.1.1`)
+  through `wg0`. The result shows in the panel and on the screen. With the kill
+  switch off, the VPN rule is tied to this check: while it fails, the rule is
+  taken out and LAN traffic uses the WAN directly until the tunnel is back.
+- **Firewall:** the panel ports (ours, and mini-net-man's) are open on
+  `panel.allowed_interfaces` and loopback only. New connections into the LAN
+  that did not start there are dropped. Traffic leaving `end0`, the modem and
+  `wg0` is masqueraded, and TCP MSS is clamped to the path MTU.
+- A port forward (DNAT) into the LAN has to be added above the router's
+  `forward-to-lan` drop rule in mini-net-man's panel, or it is dropped too.
+- Nothing restarts `wg-quick` any more. systemd retries it if it fails, and
+  `PersistentKeepalive` brings the tunnel back after the uplink changes.
+
+mini-net-man's own panel is at `http://172.16.0.1:8080/` from the LAN (the
+login was printed by `-install`; change it with
+`/opt/mini-net-man/mini-net-man passwd admin`). Check the setup with
+`ip rule`, `ip route show table 200` and `nft list table inet mini-net-man`.
 
 ## Web panel
 
 The panel listens on `http://172.16.0.1/` by default and is only reachable from
 the LAN. It shows VPN protection state, live tunnel throughput, uplinks, the
 4G modem, SMS messages from the modem's inbox, a log of the last 100
-notifications, connected clients, routing and firewall checks, and system
-health.
+notifications, connected clients, whether mini-net-man holds the router's
+setup, and system health. It also changes the Wi-Fi settings and the Ethernet
+port mode. Everything else about the network is in mini-net-man's panel.
 
 The notification log covers link changes of the router's interfaces, VPN state
-changes (logged once a state has lasted 10 seconds), new SMS, and routing or
-firewall rules that had to be restored. It is kept in memory, so it starts
+changes, new SMS, and losing or regaining contact with mini-net-man. It is kept in memory, so it starts
 empty when the router restarts. SMS already in the inbox at startup are not
 reported as new.
 
@@ -356,7 +300,7 @@ API: `GET /api/status` returns the current status as JSON and
 
 opiz3-router is released under the MIT License; see [LICENSE](LICENSE).
 
-The embedded MAC-vendor database (`internal/assets/manuf`) is derived from the
+The embedded MAC-vendor database (`internal/netscan/manuf`) is derived from the
 [Wireshark](https://www.wireshark.org/) `manuf` file, which combines the public
 IEEE OUI registry with Wireshark's own additions, and is used only to show a
 device's likely manufacturer. If you redistribute your own build, keep this

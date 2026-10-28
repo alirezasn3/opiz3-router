@@ -3,10 +3,7 @@
 // Everything that comes from the router (DHCP hostnames in particular) is
 // untrusted, so the DOM is only ever built with textContent, never innerHTML.
 
-const HISTORY_SECONDS = 180;
 const HANDSHAKE_STALE_SECONDS = 180;
-const SVG_NS = "http://www.w3.org/2000/svg";
-
 const $ = (id) => document.getElementById(id);
 
 function el(tag, props, ...children) {
@@ -20,12 +17,6 @@ function el(tag, props, ...children) {
     if (c == null) continue;
     node.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
-  return node;
-}
-
-function svg(tag, attrs) {
-  const node = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
   return node;
 }
 
@@ -100,12 +91,12 @@ let latest = null;
 function render(snap) {
   latest = snap;
   const now = parseTime(snap.time) ?? Date.now();
-  $("hostname").textContent = snap.system.hostname || "";
+  const hostEl = $("hostname");
+  if (hostEl) hostEl.textContent = snap.system.hostname || "";
   renderVPN(snap, now);
   renderWAN(snap);
   renderClients(snap, now);
   renderSystem(snap);
-  renderTraffic(snap, now);
   renderWireGuard(snap, now);
   renderModem(snap);
   renderRouting(snap);
@@ -113,20 +104,25 @@ function render(snap) {
   renderSMS(snap, now);
   renderLog(snap, now);
   renderEthernet(snap);
-  renderMonitor(snap);
+  renderNetworkScan(snap, now);
+  renderDisplay(snap);
 }
 
 function vpnState(snap, now) {
   const wg = snap.wireguard, r = snap.routing;
+  if (!r.synced) {
+    return ["warning", "Not enforced", r.error || "Waiting for mini-net-man to take over the routing and firewall."];
+  }
   const peer = wg.peers[0];
   const hs = peer ? parseTime(peer.last_handshake) : null;
   const fresh = hs != null && (now - hs) / 1000 < HANDSHAKE_STALE_SECONDS;
-  if (!r.rule) return ["critical", "Not routed", "LAN traffic is not steered into the VPN."];
-  if (wg.up && r.vpn_route && fresh) return ["good", "Protected", `Last handshake ${fmtAgo(hs, now)}.`];
-  if (wg.up && r.vpn_route) return ["warning", "No recent handshake", `Last handshake ${fmtAgo(hs, now)}. Traffic stays in the tunnel but may not get through.`];
-  if (r.kill_switch) return ["warning", "Blocked", "The VPN is down. The kill switch is holding LAN traffic back."];
-  if (!r.kill_switch_enabled) return ["critical", "Unprotected", "The VPN is down and the kill switch is off, so LAN traffic goes out unencrypted."];
-  return ["critical", "Leaking", "The VPN is down and the kill switch route is missing."];
+  if (r.vpn === "down" || !wg.up) {
+    return r.kill_switch
+      ? ["warning", "Blocked", "The VPN is down. LAN traffic is blocked to prevent leaks."]
+      : ["critical", "Unprotected", "The VPN is down. LAN clients are using the normal internet."];
+  }
+  if (fresh) return ["good", "Protected", `Last handshake ${fmtAgo(hs, now)}.`];
+  return ["warning", "No recent handshake", `Last handshake ${fmtAgo(hs, now)}. Traffic stays in the tunnel but may not get through.`];
 }
 
 function renderVPN(snap, now) {
@@ -151,8 +147,6 @@ function renderClients(snap, now) {
   const online = snap.clients.filter((c) => c.online);
   const wifi = online.filter((c) => c.wireless).length;
   $("clients-count").textContent = String(online.length);
-  // Without per-station Wi-Fi data every client would look wired, so the
-  // split is only shown when that data is available.
   $("clients-sub").textContent = snap.wireless_info
     ? `${wifi} on Wi-Fi, ${online.length - wifi} wired · ${snap.clients.length} known`
     : `${snap.clients.length} known`;
@@ -199,9 +193,11 @@ function renderSystem(snap) {
 
 function renderWireGuard(snap, now) {
   const wg = snap.wireguard;
-  $("wg-name").textContent = wg.interface || "wg0";
+  const wgName = $("wg-name");
+  if (wgName) wgName.textContent = wg.interface || "wg0";
+
   fillFacts($("wg-facts"), [
-    ["Interface", el("span", {}, el("span", { class: "mono", text: wg.interface + " " }), statusBadge(wg.up ? "good" : "critical", wg.up ? "Up" : "Down"))],
+    ["Interface", el("span", {}, el("span", { class: "mono", text: (wg.interface || "wg0") + " " }), statusBadge(wg.up ? "good" : "critical", wg.up ? "Up" : "Down"))],
     wg.error && ["Error", wg.error],
     wg.public_key && ["Public key", el("span", { class: "mono", text: wg.public_key })],
     wg.listen_port && ["Listen port", wg.listen_port],
@@ -234,26 +230,25 @@ function renderModem(snap) {
 
 function renderRouting(snap) {
   const r = snap.routing;
-  const checks = [
-    [r.ip_forward, "IP forwarding", "The kernel forwards packets between interfaces."],
-    [r.rule, "VPN policy rule", "Traffic arriving from the LAN bridge uses the VPN table."],
-    [r.vpn_route, "VPN default route", "The VPN table sends traffic into the WireGuard tunnel."],
-    [r.kill_switch_enabled ? r.kill_switch : null, "Kill switch", r.kill_switch_enabled
-      ? "A blackhole route stops LAN traffic if the tunnel goes away."
-      : "Turned off in the config. LAN traffic goes out of the WAN unencrypted while the tunnel is down."],
-    [r.firewall, "Firewall", "The panel is only reachable from the LAN; unsolicited inbound traffic to the LAN is dropped."],
+  const vpn = { up: ["good", "VPN health check passing", "Pings sent through the tunnel are answered."],
+    down: ["critical", "VPN health check failing", "Pings sent through the tunnel are not answered."],
+    unknown: ["neutral", "VPN health check pending", "Waiting for the first result."] }[r.vpn] || ["neutral", "VPN health check pending", ""];
+  const items = [
+    el("li", {},
+      r.synced ? statusBadge("good", "mini-net-man") : statusBadge("critical", "mini-net-man"),
+      el("span", { class: "check-desc", text: r.synced
+        ? "Holds the router's bridge, firewall, NAT and VPN routing."
+        : (r.error || "Not set up yet.") })),
+    el("li", {}, statusBadge(vpn[0], vpn[1]), el("span", { class: "check-desc", text: vpn[2] })),
+    el("li", {},
+      statusBadge(r.kill_switch ? "good" : "neutral", r.kill_switch ? "Kill switch on" : "Kill switch off"),
+      el("span", { class: "check-desc", text: r.kill_switch
+        ? "LAN traffic is dropped while the tunnel is missing."
+        : "LAN traffic uses the normal internet while the VPN health check fails." })),
   ];
-  // ok is null for a check that is turned off on purpose.
-  const items = checks.map(([ok, label, desc]) => el("li", {},
-    statusBadge(ok == null ? "neutral" : ok ? "good" : "critical", ok == null ? `${label} off` : label),
-    el("span", { class: "check-desc", text: desc })));
-  if (r.restores > 0) {
-    const when = parseTime(r.last_restore);
-    items.push(el("li", {},
-      statusBadge("warning", `Restored ${r.restores} time${r.restores === 1 ? "" : "s"}`),
-      el("span", { class: "check-desc", text: `Something removed part of the setup and the router put it back. Last ${fmtAgo(when, parseTime(snap.time) ?? Date.now())}: ${r.last_restore_reason || "unknown"}.` })));
+  for (const issue of r.issues || []) {
+    items.push(el("li", {}, statusBadge("warning", "Not applied yet"), el("span", { class: "check-desc", text: issue })));
   }
-  if (r.error) items.push(el("li", {}, statusBadge("warning", "Check failed"), el("span", { class: "check-desc", text: r.error })));
   $("routing-checks").replaceChildren(...items);
 }
 
@@ -284,9 +279,7 @@ function renderSMS(snap, now) {
     el("div", { class: "feed-head" },
       el("span", { class: "sms-sender" }, m.sender || "Unknown sender",
         parseTime(m.received_at) != null ? el("span", { class: "tag-new", text: "New" }) : null),
-      // Fall back to when the router saw it if the modem's date is unreadable.
       el("span", { class: "feed-time", text: feedTime(parseTime(m.time) ?? parseTime(m.received_at), now) })),
-    // dir=auto lets right-to-left messages (Persian, Arabic) read correctly.
     el("div", { class: "sms-text", dir: "auto", text: m.text })));
   $("sms-list").replaceChildren(...(items.length ? items : sms.available ? [feedEmpty("No messages")] : []));
 }
@@ -301,79 +294,109 @@ function renderLog(snap, now) {
   $("log-list").replaceChildren(...(items.length ? items : [feedEmpty("Nothing yet")]));
 }
 
-// ---- display page and Wi-Fi channels ----
+// ---- network discovery ----
 
-let pageAction = null;
-let pageMessage = null;
+let scanAction = null;
 
-function renderMonitor(snap) {
-  const m = snap.monitor;
-  const adapter = m.interface ? `${m.interface}${m.driver ? ` (${m.driver})` : ""}` : "Wi-Fi adapter";
-  const dwell = m.hop_interval_ms ? `, ${m.hop_interval_ms / 1000} s per channel` : "";
-  $("monitor-status").textContent = pageAction || (!m.present ? `${adapter} not plugged in` : m.active ? `${adapter} listening${dwell}` : `${adapter} starting…`);
-
-  const note = $("monitor-note");
-  const noteText = pageMessage || (m.present && !m.active && m.error ? `The adapter failed: ${m.error}` : "") ||
-    (!m.present ? `Plug in the USB Wi-Fi adapter${m.interface ? ` (${m.interface})` : ""} to see the Wi-Fi channels.` : "");
-  note.hidden = !noteText;
-  note.textContent = noteText;
-
-  for (const opt of document.querySelectorAll(".page-option")) {
-    const page = opt.dataset.page;
-    opt.setAttribute("aria-checked", String(page === m.page));
-    opt.disabled = !!pageAction || page === m.page || (page === "channels" && !m.present);
-  }
-
-  const show = m.active && m.channels.length > 0;
-  $("monitor-data").hidden = !show;
-  if (!show) return;
-  $("own-channel").textContent = m.own_channel || "unknown";
-  $("best-channel").textContent = m.recommended || "–";
-  const scale = Math.max(3, ...m.channels.map((c) => c.networks));
-  const cols = m.channels.map((c) => {
-    const kind = c.channel === m.recommended ? "best" : c.channel === m.own_channel ? "own" : c.networks ? "plain" : "empty";
-    const bar = el("div", { class: "channel-bar", "data-kind": kind });
-    bar.style.setProperty("height", `${c.networks ? Math.max(4, c.networks / scale * 120) : 3}px`);
-    const tip = `Channel ${c.channel}: ${c.networks} network${c.networks === 1 ? "" : "s"}` + (c.networks ? `, strongest ${c.strongest} dBm` : "");
-    return el("div", { class: "channel-col", title: tip },
-      el("span", { class: "channel-count", text: c.networks ? String(c.networks) : "" }), bar);
-  });
-  $("channel-chart").replaceChildren(...cols);
-  let labels = document.querySelector(".channel-labels");
-  if (!labels) {
-    labels = el("div", { class: "channel-labels", "aria-hidden": "true" });
-    $("channel-chart").after(labels);
-  }
-  labels.replaceChildren(...m.channels.map((c) =>
-    el("span", { class: c.channel === m.own_channel || c.channel === m.recommended ? "strong" : "", text: String(c.channel) })));
-
-  $("networks-summary").textContent = `Networks nearby (${m.networks.length})`;
-  const rows = m.networks.map((n) => el("tr", {},
-    el("td", { text: n.ssid || "Hidden network" }),
-    el("td", { class: "num", text: String(n.channel) }),
-    el("td", { class: "num", text: n.signal ? `${n.signal} dBm` : "–" })));
-  $("networks-table").replaceChildren(...(rows.length ? rows : [emptyRow(3, "None heard yet")]));
+function deviceName(d) {
+  const badge = statusBadge(d.reachable ? "good" : "neutral", d.name || "Unknown device");
+  badge.classList.add("plain");
+  badge.title = d.reachable ? "Reachable" : "Offline";
+  badge.firstElementChild.setAttribute("aria-label", badge.title);
+  badge.firstElementChild.removeAttribute("aria-hidden");
+  badge.firstElementChild.setAttribute("role", "img");
+  return badge;
 }
 
-document.querySelectorAll(".page-option").forEach((opt) => opt.addEventListener("click", async () => {
-  pageAction = "Switching…";
-  pageMessage = null;
-  if (latest) renderMonitor(latest);
-  try {
-    await postAction("api/display/page", { page: opt.dataset.page });
-  } catch (e) {
-    pageMessage = e.message;
+function renderNetworkScan(snap, now) {
+  const scan = snap.network_scan || {};
+  const active = scan.active;
+  const updated = parseTime(scan.updated_at);
+  const devCount = scan.devices ? scan.devices.length : 0;
+
+  $("netscan-status").textContent = scan.error
+    ? "Scan error"
+    : active
+    ? "Scanning…"
+    : updated
+    ? `Updated ${fmtAgo(updated, now)}`
+    : "Idle";
+
+  const scanBtn = $("netscan-btn");
+  if (scanBtn) {
+    scanBtn.disabled = active || !!scanAction;
+    scanBtn.textContent = active ? "Scanning…" : scanAction || "Scan";
   }
-  pageAction = null;
-  if (latest) renderMonitor(latest);
-}));
+
+  const sub = [];
+  if (scan.interface) sub.push(`via ${scan.interface}`);
+  if (scan.subnet) sub.push(scan.subnet);
+  if (devCount > 0) sub.push(`${devCount} device${devCount === 1 ? "" : "s"} found`);
+  $("netscan-sub").textContent = sub.join(" · ");
+
+  const note = $("netscan-note");
+  if (scan.error) {
+    note.hidden = false;
+    note.textContent = scan.error;
+  } else {
+    note.hidden = true;
+  }
+
+  const devices = scan.devices || [];
+  const rows = devices.map((d) => {
+    const reachable = d.reachable;
+    return el("tr", {},
+      el("td", {}, deviceName(d)),
+      el("td", { class: "mono", text: d.ip || "–" }),
+      el("td", { class: "mono", text: d.mac || "–" }),
+      el("td", { text: d.manufacturer || "–" }),
+      el("td", {}, statusBadge(reachable ? "good" : "neutral", reachable ? "Reachable" : "Offline"))
+    );
+  });
+
+  $("netscan-table").replaceChildren(
+    ...(rows.length ? rows : [emptyRow(5, active ? "Scanning network…" : "Click Scan to discover devices on the Ethernet network")])
+  );
+}
+
+// ---- LCD display power ----
+
+let displayAction = null;
+let displayMessage = null;
+
+function renderDisplay(snap) {
+  const d = snap.display || {};
+  const powered = d.powered !== false;
+  $("display-status").textContent = displayAction || (powered ? "Powered on" : "Powered off");
+
+  const note = $("display-note");
+  note.hidden = !displayMessage;
+  note.textContent = displayMessage || "";
+
+  const btn = $("display-toggle-btn");
+  if (btn) {
+    btn.disabled = !!displayAction;
+    btn.textContent = displayAction ? "Updating…" : powered ? "Turn display off" : "Turn display on";
+  }
+
+  const wakeBox = $("display-wake-checkbox");
+  if (wakeBox && document.activeElement !== wakeBox) {
+    wakeBox.checked = d.wake_on_notification !== false;
+  }
+
+  fillFacts($("display-facts"), [
+    ["Power", statusBadge(powered ? "good" : "neutral", powered ? "On" : "Off")],
+    ["Screen", "Status screen (ST7789 240*280)"],
+    ["Wake on event", d.wake_on_notification !== false ? "15s on notification" : "Disabled"],
+  ]);
+}
 
 // ---- Ethernet port mode ----
 
 const ETH_MODES = { uplink: "an internet uplink", lan: "a LAN port" };
 let receivedAt = Date.now();
-let ethAction = null; // text shown while a request is in flight
-let ethMessage = null; // result of the last request, if it failed
+let ethAction = null;
+let ethMessage = null;
 
 async function postAction(path, body) {
   const res = await fetch(path, {
@@ -396,8 +419,6 @@ async function runEthAction(label, path, body) {
     await postAction(path, body);
   } catch (e) {
     ethMessage = e instanceof TypeError
-      // fetch rejects with a TypeError when the connection itself fails,
-      // which is expected when the switch cuts off this device.
       ? "Lost the connection to the router. If this device is connected by Ethernet, reconnect over Wi-Fi and keep the change before the time runs out."
       : e.message;
   }
@@ -435,19 +456,6 @@ function renderEthernet(snap) {
   }
 }
 
-document.querySelectorAll(".mode-option").forEach((opt) => opt.addEventListener("click", () => {
-  const mode = opt.dataset.mode;
-  const warning = mode === "lan"
-    ? "Switch the Ethernet port to a LAN port?\n\nIt stops being an internet connection; the 4G modem will be the only one. Devices plugged into the port join the LAN."
-    : "Switch the Ethernet port to an internet uplink?\n\nDevices plugged into the port lose their connection to the LAN.";
-  if (!confirm(`${warning}\n\nIf the switch cuts off this device, it is undone automatically after 90 seconds unless you keep it.`)) return;
-  runEthAction("Switching…", "api/network/ethernet-mode", { mode });
-}));
-$("eth-keep").addEventListener("click", () => runEthAction("Keeping…", "api/network/keep"));
-$("eth-undo").addEventListener("click", () => runEthAction("Undoing…", "api/network/undo"));
-// Keep the countdown moving between updates.
-setInterval(() => { if (latest && latest.network.pending) renderEthernet(latest); }, 1000);
-
 function renderInterfaces(snap) {
   const roles = { "wan-ethernet": "Ethernet uplink", "wan-4g": "4G uplink", "wan-wifi": "Wi-Fi uplink", vpn: "VPN tunnel", lan: "LAN bridge", "lan-port": "LAN port", wifi: "Wi-Fi access point" };
   const rows = snap.interfaces.map((i) => el("tr", {},
@@ -462,135 +470,112 @@ function renderInterfaces(snap) {
   $("ifaces-table").replaceChildren(...(rows.length ? rows : [emptyRow(8, "No data yet")]));
 }
 
-function renderTraffic(snap, now) {
-  const samples = snap.traffic.map((s) => ({ t: parseTime(s.t), rx: s.rx, tx: s.tx })).filter((s) => s.t != null);
-  const last = samples[samples.length - 1];
-  $("hero-rx").textContent = last ? fmtRate(last.rx) : "–";
-  $("legend-rx").textContent = last ? fmtRate(last.rx) : "–";
-  $("legend-tx").textContent = last ? fmtRate(last.tx) : "–";
-  chart.update(samples, last ? last.t : now);
+// ---- Event Listeners ----
 
-  const rows = [];
-  for (let i = samples.length - 1; i >= 0 && rows.length < 18; i -= 10) {
-    const s = samples[i];
-    rows.push(el("tr", {}, el("td", { text: fmtClock(s.t) }), el("td", { class: "num", text: fmtRate(s.rx) }), el("td", { class: "num", text: fmtRate(s.tx) })));
-  }
-  $("traffic-table").replaceChildren(...(rows.length ? rows : [emptyRow(3, "No samples yet")]));
+const scanBtn = $("netscan-btn");
+if (scanBtn) {
+  scanBtn.addEventListener("click", async () => {
+    scanAction = "Starting…";
+    if (latest) renderNetworkScan(latest, Date.now());
+    try {
+      await postAction("api/network/scan", {});
+    } catch (e) {
+      alert("Scan failed: " + e.message);
+    }
+    scanAction = null;
+    if (latest) renderNetworkScan(latest, Date.now());
+  });
 }
 
-// ---- throughput chart ----
-
-// niceStep rounds up to 1, 2, 2.5 or 5 times a power of ten so ticks are clean.
-function niceStep(raw) {
-  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
-  for (const m of [1, 2, 2.5, 5, 10]) if (raw <= m * pow) return m * pow;
-  return 10 * pow;
+const displayToggleBtn = $("display-toggle-btn");
+if (displayToggleBtn) {
+  displayToggleBtn.addEventListener("click", async () => {
+    const powered = latest && latest.display ? latest.display.powered !== false : true;
+    const next = !powered;
+    displayAction = next ? "Turning on…" : "Turning off…";
+    displayMessage = null;
+    if (latest) renderDisplay(latest);
+    try {
+      await postAction("api/display/power", { powered: next });
+    } catch (e) {
+      displayMessage = e.message;
+    }
+    displayAction = null;
+    if (latest) renderDisplay(latest);
+  });
 }
 
-const chart = (() => {
-  const root = $("chart");
-  const tooltip = $("chart-tooltip");
-  const M = { top: 8, right: 10, bottom: 24, left: 64 };
-  let samples = [], end = Date.now(), hoverX = null, geom = null;
-  const node = svg("svg", { role: "img", "aria-label": "VPN download and upload rate over the last three minutes", tabindex: "0" });
-  root.prepend(node);
-
-  function draw() {
-    const w = root.clientWidth, h = root.clientHeight;
-    if (!w || !h) return;
-    node.setAttribute("viewBox", `0 0 ${w} ${h}`);
-    node.replaceChildren();
-    const pw = w - M.left - M.right, ph = h - M.top - M.bottom;
-    const start = end - HISTORY_SECONDS * 1000;
-    // Work in bits/s so the axis matches the displayed units.
-    const peak = Math.max(1000, ...samples.map((s) => Math.max(s.rx, s.tx) * 8));
-    const step = niceStep(peak / 4);
-    const yMax = Math.ceil(peak / step) * step;
-    const x = (t) => M.left + (t - start) / (end - start) * pw;
-    const y = (bytes) => M.top + ph - (bytes * 8) / yMax * ph;
-    geom = { x, y, start, pw };
-
-    for (let v = 0; v <= yMax + step / 2; v += step) {
-      const yy = M.top + ph - v / yMax * ph;
-      node.append(svg("line", { class: v === 0 ? "baseline" : "gridline", x1: M.left, x2: M.left + pw, y1: yy, y2: yy }));
-      const label = svg("text", { class: "tick", x: M.left - 8, y: yy + 4, "text-anchor": "end" });
-      label.textContent = fmtRate(v / 8);
-      node.append(label);
+const wakeBox = $("display-wake-checkbox");
+if (wakeBox) {
+  wakeBox.addEventListener("change", async () => {
+    try {
+      await postAction("api/display/wake-on-notification", { enabled: wakeBox.checked });
+    } catch (e) {
+      alert("Failed to update wake setting: " + e.message);
+      if (latest) renderDisplay(latest);
     }
-    for (const [secAgo, text] of [[180, "3 min ago"], [120, "2 min"], [60, "1 min"], [0, "now"]]) {
-      const label = svg("text", { class: "tick", x: x(end - secAgo * 1000), y: h - 6, "text-anchor": secAgo === 180 ? "start" : secAgo === 0 ? "end" : "middle" });
-      label.textContent = text;
-      node.append(label);
-    }
-
-    if (samples.length < 2) {
-      const t = svg("text", { class: "empty", x: M.left + pw / 2, y: M.top + ph / 2, "text-anchor": "middle" });
-      t.textContent = "Collecting samples…";
-      node.append(t);
-      return;
-    }
-    for (const key of ["tx", "rx"]) {
-      let d = "", prev = null;
-      for (const s of samples) {
-        if (s.t < start) continue;
-        // Break the line where samples are missing instead of bridging the gap.
-        d += (prev && s.t - prev.t < 3500 ? "L" : "M") + x(s.t).toFixed(1) + "," + y(s[key]).toFixed(1);
-        prev = s;
-      }
-      node.append(svg("path", { class: `line line-${key}`, d }));
-    }
-    if (hoverX != null) drawHover();
-  }
-
-  function nearest(px) {
-    const t = geom.start + (px - M.left) / geom.pw * HISTORY_SECONDS * 1000;
-    let best = null;
-    for (const s of samples) if (!best || Math.abs(s.t - t) < Math.abs(best.t - t)) best = s;
-    return best;
-  }
-
-  function drawHover() {
-    node.querySelectorAll(".hover").forEach((n) => n.remove());
-    const s = nearest(hoverX);
-    if (!s || !geom) { tooltip.hidden = true; return; }
-    const xx = geom.x(s.t);
-    const g = svg("g", { class: "hover" });
-    g.append(svg("line", { class: "crosshair", x1: xx, x2: xx, y1: M.top, y2: root.clientHeight - M.bottom }));
-    for (const key of ["tx", "rx"]) g.append(svg("circle", { class: `dot dot-${key}`, cx: xx, cy: geom.y(s[key]), r: 4 }));
-    node.append(g);
-
-    const row = (key, label, value) => el("div", { class: "tt-row" }, el("span", { class: `key key-${key}` }), el("strong", { text: fmtRate(value) }), el("span", { text: label }));
-    tooltip.replaceChildren(
-      el("div", { class: "tt-time", text: `${fmtClock(s.t)} · ${fmtAgo(s.t, end)}` }),
-      row("rx", "Download", s.rx),
-      row("tx", "Upload", s.tx));
-    tooltip.hidden = false;
-    const tw = tooltip.offsetWidth;
-    const left = xx + 12 + tw > root.clientWidth ? xx - 12 - tw : xx + 12;
-    tooltip.style.setProperty("left", Math.max(0, left) + "px");
-  }
-
-  function hide() { hoverX = null; tooltip.hidden = true; node.querySelectorAll(".hover").forEach((n) => n.remove()); }
-
-  node.addEventListener("pointermove", (e) => {
-    const rect = node.getBoundingClientRect();
-    hoverX = e.clientX - rect.left;
-    if (samples.length) drawHover();
   });
-  node.addEventListener("pointerleave", hide);
-  node.addEventListener("blur", hide);
-  node.addEventListener("focus", () => { if (samples.length) { hoverX = geom.x(samples[samples.length - 1].t); drawHover(); } });
-  node.addEventListener("keydown", (e) => {
-    if (!samples.length || hoverX == null || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
-    e.preventDefault();
-    const i = samples.indexOf(nearest(hoverX)) + (e.key === "ArrowLeft" ? -1 : 1);
-    hoverX = geom.x(samples[Math.max(0, Math.min(samples.length - 1, i))].t);
-    drawHover();
-  });
-  new ResizeObserver(draw).observe(root);
+}
 
-  return { update(s, e) { samples = s; end = e; draw(); } };
-})();
+document.querySelectorAll(".mode-option").forEach((opt) => opt.addEventListener("click", () => {
+  const mode = opt.dataset.mode;
+  const warning = mode === "lan"
+    ? "Switch the Ethernet port to a LAN port?\n\nIt stops being an internet connection; the 4G modem will be the only one. Devices plugged into the port join the LAN."
+    : "Switch the Ethernet port to an internet uplink?\n\nDevices plugged into the port lose their connection to the LAN.";
+  if (!confirm(`${warning}\n\nIf the switch cuts off this device, it is undone automatically after 90 seconds unless you keep it.`)) return;
+  runEthAction("Switching…", "api/network/ethernet-mode", { mode });
+}));
+
+$("eth-keep").addEventListener("click", () => runEthAction("Keeping…", "api/network/keep"));
+$("eth-undo").addEventListener("click", () => runEthAction("Undoing…", "api/network/undo"));
+setInterval(() => { if (latest && latest.network.pending) renderEthernet(latest); }, 1000);
+
+// ---- Wi-Fi access point ----
+
+const wifiFields = { ssid: "wifi-ssid", channel: "wifi-channel", dhcp_start: "wifi-dhcp-start", dhcp_end: "wifi-dhcp-end" };
+
+function showWiFiNote(text) {
+  $("wifi-note").hidden = !text;
+  $("wifi-note").textContent = text || "";
+}
+
+async function loadWiFi() {
+  try {
+    const res = await fetch("api/wifi", { cache: "no-store" });
+    if (!res.ok) throw new Error(`The router answered ${res.status}.`);
+    const w = await res.json();
+    for (const [key, id] of Object.entries(wifiFields)) $(id).value = w[key] ?? "";
+    $("wifi-passphrase").value = "";
+    $("wifi-passphrase").placeholder = w.passphrase_set ? "Leave empty to keep" : "Required, 8 to 63 characters";
+    $("wifi-passphrase").required = !w.passphrase_set;
+    $("wifi-status").textContent = "";
+  } catch (e) {
+    $("wifi-status").textContent = "Could not load the settings";
+    showWiFiNote(e.message);
+  }
+}
+
+$("wifi-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  if (!confirm("Save the Wi-Fi settings? The access point restarts and Wi-Fi devices reconnect.")) return;
+  const body = { ssid: $("wifi-ssid").value, passphrase: $("wifi-passphrase").value, channel: Number($("wifi-channel").value),
+    dhcp_start: $("wifi-dhcp-start").value.trim(), dhcp_end: $("wifi-dhcp-end").value.trim() };
+  $("wifi-save").disabled = true;
+  $("wifi-status").textContent = "Saving…";
+  showWiFiNote("");
+  try {
+    await postAction("api/wifi", body);
+    $("wifi-status").textContent = "Saved";
+    await loadWiFi();
+    $("wifi-status").textContent = "Saved";
+  } catch (e) {
+    $("wifi-status").textContent = "";
+    showWiFiNote(e instanceof TypeError ? "Lost the connection while the access point restarted. Reconnect and check that the settings were saved." : e.message);
+  }
+  $("wifi-save").disabled = false;
+});
+
+loadWiFi();
 
 // ---- live connection ----
 
@@ -617,7 +602,6 @@ function connect() {
   }
   const es = new EventSource("api/events");
   es.addEventListener("status", (e) => onSnapshot(JSON.parse(e.data)));
-  // EventSource reconnects by itself; only reflect the state.
   es.onerror = () => setConn("offline", "Reconnecting…");
 }
 

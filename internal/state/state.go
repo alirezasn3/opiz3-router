@@ -24,7 +24,7 @@ type Snapshot struct {
 	WirelessInfo  bool           `json:"wireless_info"`
 	SMS           SMSInbox       `json:"sms"`
 	Network       Network        `json:"network"`
-	Monitor       Monitor        `json:"monitor"`
+	Display       Display        `json:"display"`
 	NetworkScan   NetworkScan    `json:"network_scan"`
 	Notifications []Notification `json:"notifications"`
 	System        System         `json:"system"`
@@ -98,50 +98,10 @@ type Modem struct {
 	SoftwareVersion  string `json:"software_version,omitempty"`
 }
 
-// Display pages.
-const (
-	PageStatus   = "status"
-	PageChannels = "channels"
-	PageNetwork  = "network"
-)
-
-// Monitor is the Wi-Fi adapter in monitor mode and what it hears.
-type Monitor struct {
-	// Page is what the display shows.
-	Page      string `json:"page"`
-	Interface string `json:"interface"`
-	Present   bool   `json:"present"`
-	Driver    string `json:"driver,omitempty"`
-	// Active is true while the adapter captures.
-	Active bool   `json:"active"`
-	Error  string `json:"error,omitempty"`
-	// Channels holds 2.4 GHz channels 1 to 13.
-	Channels []MonitorChannel `json:"channels"`
-	Networks []MonitorNetwork `json:"networks"`
-	// OwnChannel is the router's access point channel, 0 if unknown.
-	OwnChannel int `json:"own_channel"`
-	// OwnSignal is how strongly the adapter hears the router's own access
-	// point in dBm, 0 if not heard.
-	OwnSignal int `json:"own_signal"`
-	// ScanChannel is the channel the adapter is listening on right now.
-	ScanChannel int `json:"scan_channel"`
-	// HopIntervalMS is how long the adapter listens on each channel.
-	HopIntervalMS int       `json:"hop_interval_ms"`
-	Recommended   int       `json:"recommended"`
-	UpdatedAt     time.Time `json:"updated_at,omitzero"`
-}
-
-type MonitorChannel struct {
-	Channel  int `json:"channel"`
-	Networks int `json:"networks"`
-	// Strongest is in dBm, 0 when the channel is empty.
-	Strongest int `json:"strongest"`
-}
-
-type MonitorNetwork struct {
-	SSID    string `json:"ssid"`
-	Channel int    `json:"channel"`
-	Signal  int    `json:"signal"`
+// Display holds the state of the router's LCD display.
+type Display struct {
+	Powered            bool `json:"powered"`
+	WakeOnNotification bool `json:"wake_on_notification"`
 }
 
 // Network is the state of switching the Ethernet port's mode from the panel.
@@ -226,26 +186,22 @@ type System struct {
 	TemperatureC *float64 `json:"temperature_c"`
 }
 
-// Routing describes whether LAN traffic is protected by the VPN.
+// Routing is how the firewall, NAT and VPN routing held by mini-net-man are
+// doing.
 type Routing struct {
-	IPForward bool `json:"ip_forward"`
-	// Rule is the "iif <bridge> lookup <table>" policy rule.
-	Rule bool `json:"rule"`
-	// VPNRoute is the default route through the WireGuard interface.
-	VPNRoute bool `json:"vpn_route"`
-	// KillSwitch is the fallback blackhole route that stops LAN traffic from
-	// leaking out of the WAN when the VPN route disappears.
+	// Synced is true when mini-net-man holds the router's config and answers.
+	Synced   bool      `json:"synced"`
+	SyncedAt time.Time `json:"synced_at,omitzero"`
+	// VPN is the tunnel's health check: "up", "down" or "unknown".
+	VPN string `json:"vpn"`
+	// KillSwitch is the configured setting. With it on, LAN traffic is
+	// dropped while the tunnel is missing; with it off, the LAN uses the
+	// uplink directly while the health check fails.
 	KillSwitch bool `json:"kill_switch"`
-	// KillSwitchEnabled is the configured setting; KillSwitch is whether the
-	// route is actually present.
-	KillSwitchEnabled bool `json:"kill_switch_enabled"`
-	// Restores counts how often missing rules or routes were put back,
-	// usually after another program such as systemd-networkd removed them.
-	Restores          int       `json:"restores"`
-	LastRestore       time.Time `json:"last_restore,omitzero"`
-	LastRestoreReason string    `json:"last_restore_reason,omitempty"`
-	Firewall          bool      `json:"firewall"`
-	Error             string    `json:"error,omitempty"`
+	// Issues are managed items that mini-net-man could not apply yet, such as
+	// the tunnel's route while the tunnel is down.
+	Issues []string `json:"issues"`
+	Error  string   `json:"error,omitempty"`
 }
 
 type TrafficSample struct {
@@ -256,13 +212,27 @@ type TrafficSample struct {
 
 // Store is safe for concurrent use.
 type Store struct {
-	mu   sync.RWMutex
-	snap Snapshot
-	subs map[chan struct{}]struct{}
+	mu       sync.RWMutex
+	snap     Snapshot
+	subs     map[chan struct{}]struct{}
+	onNotify []func(Notification)
 }
 
 func NewStore() *Store {
-	return &Store{subs: map[chan struct{}]struct{}{}}
+	return &Store{
+		snap: Snapshot{
+			Display: Display{Powered: true, WakeOnNotification: true},
+			Routing: Routing{VPN: "unknown"},
+		},
+		subs: map[chan struct{}]struct{}{},
+	}
+}
+
+// OnNotification registers a callback invoked whenever a notification is added to the log.
+func (s *Store) OnNotification(fn func(Notification)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onNotify = append(s.onNotify, fn)
 }
 
 // Update applies fn to the snapshot and notifies subscribers.
@@ -297,13 +267,12 @@ func (s *Store) Snapshot() Snapshot {
 	c.Clients = cloneSlice(s.snap.Clients)
 	c.SMS.Messages = cloneSlice(s.snap.SMS.Messages)
 	c.Notifications = cloneSlice(s.snap.Notifications)
-	c.Monitor.Channels = cloneSlice(s.snap.Monitor.Channels)
-	c.Monitor.Networks = cloneSlice(s.snap.Monitor.Networks)
 	c.NetworkScan.Devices = cloneSlice(s.snap.NetworkScan.Devices)
 	if p := s.snap.Network.Pending; p != nil {
 		v := *p
 		c.Network.Pending = &v
 	}
+	c.Routing.Issues = cloneSlice(s.snap.Routing.Issues)
 	c.Traffic = cloneSlice(s.snap.Traffic)
 	if t := s.snap.System.TemperatureC; t != nil {
 		v := *t
@@ -328,7 +297,19 @@ func (s *Store) Subscribe() (<-chan struct{}, func()) {
 
 // Notify adds a notification to the log.
 func (s *Store) Notify(level, source, text string) {
-	s.Update(func(snap *Snapshot) { snap.Notify(level, source, text) })
+	n := Notification{Time: time.Now(), Level: level, Source: source, Text: text}
+	s.Update(func(snap *Snapshot) {
+		snap.Notifications = append(snap.Notifications, n)
+		if count := len(snap.Notifications); count > NotificationLimit {
+			snap.Notifications = append(snap.Notifications[:0], snap.Notifications[count-NotificationLimit:]...)
+		}
+	})
+	s.mu.RLock()
+	cbs := append([]func(Notification){}, s.onNotify...)
+	s.mu.RUnlock()
+	for _, fn := range cbs {
+		fn(n)
+	}
 }
 
 // Notify adds a notification to the log, for use inside Store.Update.

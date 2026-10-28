@@ -1,0 +1,44 @@
+# Push a tag like v1.0.1 and this tests the code, builds the arm64 binary and
+# publishes a GitHub Release. `opiz3-router -update` downloads from it, so the
+# asset names and checksums.txt must stay as they are.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build
+        run: |
+          mkdir dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o dist/opiz3-router-linux-arm64 ./cmd/opiz3-router
+          cd dist && sha256sum opiz3-router-linux-arm64 > checksums.txt && cat checksums.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac  # v1.0.0-rc1 is not offered as "latest"
+          gh release create "$GITHUB_REF_NAME" \
+            dist/opiz3-router-linux-arm64 dist/checksums.txt \
+            --title "$GITHUB_REF_NAME" --generate-notes $flags

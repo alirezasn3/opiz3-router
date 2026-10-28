@@ -1,2 +1,0 @@
-overlay_prefix=sun50i-h616
-overlays=spi1-cs0-spidev

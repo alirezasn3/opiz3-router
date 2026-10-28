@@ -101,3 +101,15 @@ func TestNotifyKeepsLatest(t *testing.T) {
 		t.Fatal("snapshot shares notifications with the store")
 	}
 }
+
+func TestOnNotification(t *testing.T) {
+	s := NewStore()
+	var received []Notification
+	s.OnNotification(func(n Notification) {
+		received = append(received, n)
+	})
+	s.Notify(Good, "test", "hello")
+	if len(received) != 1 || received[0].Text != "hello" || received[0].Level != Good {
+		t.Fatalf("received = %+v", received)
+	}
+}

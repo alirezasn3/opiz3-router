@@ -4,8 +4,6 @@ github.com/alirezasn3/go-permissions v1.0.0 h1:9TU0LKJqESdmBiQIydKwgD7O0ns6Wj2O6
 github.com/alirezasn3/go-permissions v1.0.0/go.mod h1:3yn6OdNSK9nx1lOdxOhmbYdGed8O9t1a8ZLHXtcceAI=
 github.com/alirezasn3/go-systemd v1.3.0 h1:OrpprH5IqECWXkUt1EAX36zXaTPPq8fQoqd6e/J1yoY=
 github.com/alirezasn3/go-systemd v1.3.0/go.mod h1:PJ6bnu3AP4CbwkA6H+/bKqoF2UWku8ME1HraSsUic60=
-github.com/coreos/go-iptables v0.8.0 h1:MPc2P89IhuVpLI7ETL/2tx3XZ61VeICZjYqDEgNsPRc=
-github.com/coreos/go-iptables v0.8.0/go.mod h1:Qe8Bv2Xik5FyTXwgIbLAnv2sWSBmvWdFETJConOQ//Q=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 github.com/google/gopacket v1.1.19 h1:ves8RnFZPGiFnTS0uPQStjwru6uO6h+nlr9j6fL7kF8=

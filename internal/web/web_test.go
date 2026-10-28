@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"opiz3-router/internal/setup"
 	"opiz3-router/internal/state"
 )
 
@@ -218,29 +219,111 @@ func TestNetworkActionsNeedSwitcher(t *testing.T) {
 	}
 }
 
-type fakeDisplay struct{ pages []string }
-
-func (f *fakeDisplay) SetDisplayPage(p string) error {
-	if p != "status" && p != "channels" {
-		return errors.New("unknown page")
-	}
-	f.pages = append(f.pages, p)
-	return nil
+type fakeDisplay struct {
+	powers []bool
+	wakes  []bool
+	err    error
 }
 
-func TestDisplayPageAction(t *testing.T) {
+func (f *fakeDisplay) SetDisplayPower(on bool) error {
+	f.powers = append(f.powers, on)
+	return f.err
+}
+
+func (f *fakeDisplay) SetWakeOnNotification(enabled bool) error {
+	f.wakes = append(f.wakes, enabled)
+	return f.err
+}
+
+func TestDisplayPowerAction(t *testing.T) {
 	d := &fakeDisplay{}
 	h := NewHandler(state.NewStore(), Options{Display: d})
-	if rec := post(t, h, "/api/display/page", `{"page":"channels"}`, nil); rec.Code != http.StatusAccepted {
+	if rec := post(t, h, "/api/display/power", `{"powered":false}`, nil); rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d %s", rec.Code, rec.Body)
 	}
-	if rec := post(t, h, "/api/display/page", `{"page":"nope"}`, nil); rec.Code != http.StatusConflict {
-		t.Fatalf("bad page: status %d", rec.Code)
+	if rec := post(t, h, "/api/display/power", `{"enabled":true}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
 	}
-	if rec := post(t, h, "/api/display/page", `{"page":"status"}`, map[string]string{"Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
+	if rec := post(t, h, "/api/display/power", `{"invalid":123}`, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("missing powered: status %d", rec.Code)
+	}
+	if rec := post(t, h, "/api/display/power", `{"powered":true}`, map[string]string{"Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-site: status %d", rec.Code)
 	}
-	if len(d.pages) != 1 || d.pages[0] != "channels" {
-		t.Fatalf("pages = %v", d.pages)
+	if len(d.powers) != 2 || d.powers[0] != false || d.powers[1] != true {
+		t.Fatalf("powers = %v", d.powers)
+	}
+
+	if rec := post(t, h, "/api/display/wake-on-notification", `{"enabled":true}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("wake status %d %s", rec.Code, rec.Body)
+	}
+	if len(d.wakes) != 1 || d.wakes[0] != true {
+		t.Fatalf("wakes = %v", d.wakes)
+	}
+}
+
+type fakeWiFi struct {
+	s       setup.Settings
+	updates []setup.Settings
+	err     error
+}
+
+func (f *fakeWiFi) Settings() setup.Settings { return f.s }
+
+func (f *fakeWiFi) Update(_ context.Context, s setup.Settings) error {
+	f.updates = append(f.updates, s)
+	return f.err
+}
+
+func TestWiFiSettings(t *testing.T) {
+	w := &fakeWiFi{s: setup.Settings{SSID: "Home", PassphraseSet: true, Channel: 6}}
+	h := NewHandler(state.NewStore(), Options{WiFi: w})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://172.16.0.1/api/wifi", nil))
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "passphrase\":\"") {
+		t.Fatalf("GET: status %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"ssid":"Home"`) || !strings.Contains(rec.Body.String(), `"passphrase_set":true`) {
+		t.Fatalf("GET body = %s", rec.Body)
+	}
+
+	if rec := post(t, h, "/api/wifi", `{"ssid":"Office","channel":11,"passphrase":"correct horse"}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("POST: status %d %s", rec.Code, rec.Body)
+	}
+	if len(w.updates) != 1 || w.updates[0].SSID != "Office" || w.updates[0].Passphrase != "correct horse" {
+		t.Fatalf("updates = %+v", w.updates)
+	}
+	w.err = errors.New("hostapd would not start")
+	rec = post(t, h, "/api/wifi", `{"ssid":"Office"}`, nil)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "hostapd would not start") {
+		t.Fatalf("error: status %d %s", rec.Code, rec.Body)
+	}
+	if rec := post(t, h, "/api/wifi", `{"ssid":"Evil"}`, map[string]string{"Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site: status %d", rec.Code)
+	}
+	if len(w.updates) != 2 {
+		t.Fatalf("updates = %d, want 2", len(w.updates))
+	}
+}
+
+type fakeScanner struct {
+	scans int
+	err   error
+}
+
+func (f *fakeScanner) TriggerScan() error {
+	f.scans++
+	return f.err
+}
+
+func TestNetworkScanAction(t *testing.T) {
+	sc := &fakeScanner{}
+	h := NewHandler(state.NewStore(), Options{Scanner: sc})
+	if rec := post(t, h, "/api/network/scan", `{}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	if sc.scans != 1 {
+		t.Fatalf("scans = %d, want 1", sc.scans)
 	}
 }

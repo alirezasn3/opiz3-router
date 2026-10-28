@@ -12,7 +12,8 @@
     "interface": "wg0",
     "table": 200,
     "rule_priority": 1000,
-    "kill_switch": true
+    "kill_switch": true,
+    "health_target": "1.1.1.1"
   },
   "panel": {
     "enabled": true,
@@ -28,16 +29,22 @@
     "cs_pin": "GPIO70",
     "backlight_pin": "GPIO227"
   },
-  "monitor": {
-    "enabled": true,
-    "interface": "wlx10feed10c013",
-    "hostapd_config": "/etc/hostapd/hostapd.conf",
-    "hop_interval_ms": 1000
-  },
   "network": {
     "netplan_file": "/etc/netplan/opiz3-router.yaml",
     "bridge_address": "172.16.0.1/12",
-    "dns": ["1.1.1.1", "8.8.8.8"]
+    "dns": ["1.1.1.1", "8.8.8.8"],
+    "dhcp_start": "172.16.0.2",
+    "dhcp_end": "172.16.0.99"
+  },
+  "wifi": {
+    "ssid": "OrangePiZero3",
+    "passphrase": "",
+    "channel": 6
+  },
+  "mini_net_man": {
+    "url": "http://127.0.0.1:8080",
+    "token": "",
+    "dir": "/opt/mini-net-man"
   },
   "dhcp_leases_file": "/var/lib/misc/dnsmasq.leases"
 }

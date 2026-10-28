@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"opiz3-router/internal/setup"
 	"opiz3-router/internal/state"
 )
 
@@ -35,13 +36,29 @@ type Options struct {
 	KeepAliveInterval time.Duration
 	// Network, when set, lets the panel switch the Ethernet port's mode.
 	Network NetworkSwitcher
-	// Display, when set, lets the panel choose what the display shows.
+	// Display, when set, lets the panel choose whether the display is on or off.
 	Display DisplayController
+	// WiFi, when set, lets the panel change the access point and DHCP settings.
+	WiFi WiFiController
+	// Scanner, when set, lets the panel trigger network discovery scans.
+	Scanner NetworkScanner
 }
 
-// DisplayController chooses the display's page.
+// DisplayController controls display power and wake settings.
 type DisplayController interface {
-	SetDisplayPage(page string) error
+	SetDisplayPower(on bool) error
+	SetWakeOnNotification(enabled bool) error
+}
+
+// WiFiController reads and changes the access point and DHCP settings.
+type WiFiController interface {
+	Settings() setup.Settings
+	Update(ctx context.Context, s setup.Settings) error
+}
+
+// NetworkScanner triggers on-demand network discovery scans.
+type NetworkScanner interface {
+	TriggerScan() error
 }
 
 // NetworkSwitcher changes the router's network setup. Errors are shown to
@@ -89,15 +106,55 @@ func NewHandler(store *state.Store, opts Options) http.Handler {
 		mux.Handle("POST /api/network/keep", action(func(*http.Request) error { return n.KeepSwitch() }))
 		mux.Handle("POST /api/network/undo", action(func(*http.Request) error { return n.UndoSwitch() }))
 	}
+	if sc := opts.Scanner; sc != nil {
+		mux.Handle("POST /api/network/scan", action(func(*http.Request) error {
+			return sc.TriggerScan()
+		}))
+	}
 	if d := opts.Display; d != nil {
-		mux.Handle("POST /api/display/page", action(func(r *http.Request) error {
+		mux.Handle("POST /api/display/power", action(func(r *http.Request) error {
 			var body struct {
-				Page string `json:"page"`
+				Powered *bool `json:"powered"`
+				Enabled *bool `json:"enabled"`
 			}
 			if e := json.NewDecoder(r.Body).Decode(&body); e != nil {
 				return fmt.Errorf("invalid request: %w", e)
 			}
-			return d.SetDisplayPage(body.Page)
+			var on bool
+			if body.Powered != nil {
+				on = *body.Powered
+			} else if body.Enabled != nil {
+				on = *body.Enabled
+			} else {
+				return errors.New("missing powered field")
+			}
+			return d.SetDisplayPower(on)
+		}))
+		mux.Handle("POST /api/display/wake-on-notification", action(func(r *http.Request) error {
+			var body struct {
+				Enabled *bool `json:"enabled"`
+			}
+			if e := json.NewDecoder(r.Body).Decode(&body); e != nil {
+				return fmt.Errorf("invalid request: %w", e)
+			}
+			if body.Enabled == nil {
+				return errors.New("missing enabled field")
+			}
+			return d.SetWakeOnNotification(*body.Enabled)
+		}))
+	}
+	if w := opts.WiFi; w != nil {
+		mux.HandleFunc("GET /api/wifi", func(rw http.ResponseWriter, r *http.Request) {
+			rw.Header().Set("Content-Type", "application/json")
+			rw.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(rw).Encode(w.Settings())
+		})
+		mux.Handle("POST /api/wifi", actionLimit(4096, func(r *http.Request) error {
+			var in setup.Settings
+			if e := json.NewDecoder(r.Body).Decode(&in); e != nil {
+				return fmt.Errorf("invalid request: %w", e)
+			}
+			return w.Update(r.Context(), in)
 		}))
 	}
 
@@ -159,13 +216,16 @@ func streamEvents(w http.ResponseWriter, r *http.Request, store *state.Store, op
 // action wraps a state-changing request. It only accepts JSON requests from
 // the panel itself, so another web page open in the same browser cannot
 // trigger it (cross-site request forgery or DNS rebinding).
-func action(do func(*http.Request) error) http.Handler {
+func action(do func(*http.Request) error) http.Handler { return actionLimit(1024, do) }
+
+// actionLimit is action for requests that may carry up to limit bytes.
+func actionLimit(limit int64, do func(*http.Request) error) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if e := sameOrigin(r); e != nil {
 			writeError(w, http.StatusForbidden, e)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		if e := do(r); e != nil {
 			writeError(w, http.StatusConflict, e)
 			return
