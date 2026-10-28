@@ -30,11 +30,12 @@ func newTestInstaller(t *testing.T) *testInstall {
 	dir := t.TempDir()
 	cfg := config.Default()
 	cfg.Network.NetplanFile = filepath.Join(dir, "netplan", "opiz3-router.yaml")
-	cfg.MiniNetMan.Dir = filepath.Join(dir, "mnm")
 	p := testPaths(t)
 	run := &fakeRunner{replies: map[string]string{}}
 	in := NewInstaller(cfg, filepath.Join(dir, "config.json"), &bytes.Buffer{})
 	in.Paths, in.Run = p, run
+	// Like ~/opiz3-router, with mini-net-man in ~/mini-net-man beside it.
+	in.AppDir = filepath.Join(dir, "home", "opiz3-router")
 	return &testInstall{in, run, dir}
 }
 
@@ -301,7 +302,7 @@ func TestInstallMiniNetMan(t *testing.T) {
 		t.Fatal(e)
 	}
 	ti.MiniNetManBinary = local
-	bin := filepath.Join(ti.Cfg.MiniNetMan.Dir, "mini-net-man")
+	bin := filepath.Join(ti.MiniNetManDir(), "mini-net-man")
 	ti.run.replies[bin+" install"] = "\nCreated config.yaml\n  login:    admin / pw123456   (change it)\n"
 
 	if e := ti.installMiniNetMan(context.Background()); e != nil {
@@ -317,7 +318,7 @@ func TestInstallMiniNetMan(t *testing.T) {
 
 	// With a working token nothing more is needed, and the login is not asked for.
 	// (The real install has made config.yaml by now.)
-	if e = os.WriteFile(filepath.Join(ti.Cfg.MiniNetMan.Dir, "config.yaml"), nil, 0o600); e != nil {
+	if e = os.WriteFile(filepath.Join(ti.MiniNetManDir(), "config.yaml"), nil, 0o600); e != nil {
 		t.Fatal(e)
 	}
 	ti.run.calls = nil
@@ -335,11 +336,11 @@ func TestInstallMiniNetManWithoutAToken(t *testing.T) {
 	ti := newTestInstaller(t)
 	srv := fakeMiniNetMan(t, "pw123456")
 	ti.Cfg.MiniNetMan.URL = srv.URL
-	bin := filepath.Join(ti.Cfg.MiniNetMan.Dir, "mini-net-man")
-	if e := os.MkdirAll(ti.Cfg.MiniNetMan.Dir, 0o755); e != nil {
+	bin := filepath.Join(ti.MiniNetManDir(), "mini-net-man")
+	if e := os.MkdirAll(ti.MiniNetManDir(), 0o755); e != nil {
 		t.Fatal(e)
 	}
-	for _, f := range []string{bin, filepath.Join(ti.Cfg.MiniNetMan.Dir, "config.yaml")} {
+	for _, f := range []string{bin, filepath.Join(ti.MiniNetManDir(), "config.yaml")} {
 		if e := os.WriteFile(f, nil, 0o755); e != nil {
 			t.Fatal(e)
 		}
@@ -399,5 +400,40 @@ func TestDownloadMiniNetManChecksArchiveAgainstChecksums(t *testing.T) {
 		if _, e := os.Stat(bin); !os.IsNotExist(e) {
 			t.Fatalf("%s: a binary that failed its checksum was installed", name)
 		}
+	}
+}
+
+func TestMiniNetManLivesNextToTheAppFolder(t *testing.T) {
+	ti := newTestInstaller(t)
+	if got, want := ti.MiniNetManDir(), filepath.Join(ti.dir, "home", "mini-net-man"); got != want {
+		t.Fatalf("dir = %q, want %q", got, want)
+	}
+	ti.Cfg.MiniNetMan.Dir = "/srv/mnm"
+	if got := ti.MiniNetManDir(); got != "/srv/mnm" {
+		t.Fatalf("an explicit dir is ignored: %q", got)
+	}
+}
+
+func TestServiceRunsTheBinaryWhereItIs(t *testing.T) {
+	ti := newTestInstaller(t)
+	exe := filepath.Join(ti.AppDir, "opiz3-router")
+
+	ti.CfgPath = filepath.Join(ti.AppDir, "config.json")
+	if got := ti.execStart(exe); got != exe {
+		t.Errorf("config next to the binary: %q", got)
+	}
+	ti.CfgPath = "/srv/router.json"
+	if got := ti.execStart(exe); got != exe+" -config /srv/router.json" {
+		t.Errorf("config elsewhere: %q", got)
+	}
+}
+
+func TestNetplanBackupIsKeptWithTheApp(t *testing.T) {
+	ti := newTestInstaller(t)
+	if got, want := DefaultPaths("/home/x/opiz3-router").NetplanBackup, "/home/x/opiz3-router/netplan-backup"; got != want {
+		t.Fatalf("backup = %q, want %q", got, want)
+	}
+	if NewInstaller(ti.Cfg, "x", &bytes.Buffer{}).AppDir == "" {
+		t.Fatal("no app folder")
 	}
 }

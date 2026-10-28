@@ -29,10 +29,12 @@ var packages = []string{"wireguard-tools", "hostapd", "dnsmasq", "iw", "netplan.
 type Installer struct {
 	Cfg     config.Config
 	CfgPath string
-	Paths   Paths
-	Run     Runner
-	HTTP    *http.Client
-	Out     io.Writer
+	// AppDir is the folder of the router's binary, which holds its config.
+	AppDir string
+	Paths  Paths
+	Run    Runner
+	HTTP   *http.Client
+	Out    io.Writer
 
 	// MiniNetManBinary is a local mini-net-man binary to use instead of
 	// downloading the latest release.
@@ -47,12 +49,16 @@ type Installer struct {
 }
 
 func NewInstaller(cfg config.Config, cfgPath string, out io.Writer) *Installer {
+	appDir := config.ExecutableDir()
 	return &Installer{
-		Cfg: cfg, CfgPath: cfgPath, Paths: DefaultPaths(), Run: ExecRunner(), Out: out,
+		Cfg: cfg, CfgPath: cfgPath, AppDir: appDir, Paths: DefaultPaths(appDir), Run: ExecRunner(), Out: out,
 		HTTP:        &http.Client{Timeout: 5 * time.Minute},
 		ReleaseBase: "https://github.com/alirezasn3/mini-net-man/releases/latest/download",
 	}
 }
+
+// MiniNetManDir is the folder that holds mini-net-man and its config.yaml.
+func (in *Installer) MiniNetManDir() string { return in.Cfg.MiniNetManDir(in.AppDir) }
 
 func (in *Installer) say(format string, args ...any) {
 	fmt.Fprintf(in.Out, format+"\n", args...)
@@ -376,10 +382,6 @@ func (in *Installer) installService(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	execStart := exe
-	if in.CfgPath != config.DefaultPath {
-		execStart += " -config " + in.CfgPath
-	}
 	changed, e := in.dropIn(ServiceName+".service", "[Unit]\nAfter=mini-net-man.service\nWants=mini-net-man.service\n")
 	if e != nil {
 		return e
@@ -392,11 +394,20 @@ func (in *Installer) installService(ctx context.Context) error {
 	return goSystemd.CreateService(&goSystemd.Service{
 		Name:        ServiceName,
 		Description: "Orangepi Zero 3 Router",
-		ExecStart:   execStart,
+		ExecStart:   in.execStart(exe),
 		Restart:     "on-failure",
 		RestartSec:  "10s",
 		After:       "network-online.target",
 		Wants:       "network-online.target",
 		WantedBy:    "multi-user.target",
 	})
+}
+
+// execStart is the service's command line: the binary where it is, with
+// -config only when the config is not the one next to it.
+func (in *Installer) execStart(exe string) string {
+	if filepath.Clean(in.CfgPath) != filepath.Join(in.AppDir, config.ConfigName) {
+		return exe + " -config " + in.CfgPath
+	}
+	return exe
 }

@@ -26,13 +26,15 @@ type Paths struct {
 	NetworkdConf  string
 }
 
-func DefaultPaths() Paths {
+// DefaultPaths are the system's files. The backup of the image's own netplan
+// files goes next to the router's binary, with the rest of its files.
+func DefaultPaths(appDir string) Paths {
 	return Paths{
 		BootEnv:       "/boot/orangepiEnv.txt",
 		Hostapd:       "/etc/hostapd/hostapd.conf",
 		Dnsmasq:       "/etc/dnsmasq.d/br0.conf",
 		SystemdDir:    "/etc/systemd/system",
-		NetplanBackup: "/etc/opiz3-router/netplan-backup",
+		NetplanBackup: filepath.Join(appDir, "netplan-backup"),
 		WireGuardDir:  "/etc/wireguard",
 		PolicyRC:      "/usr/sbin/policy-rc.d",
 		NetworkdConf:  "/etc/systemd/networkd.conf.d/opiz3-router.conf",
@@ -143,7 +145,7 @@ type AP struct {
 }
 
 func NewAP(cfg config.Config, cfgPath string) *AP {
-	return &AP{cfg: cfg, path: cfgPath, paths: DefaultPaths(), run: ExecRunner()}
+	return &AP{cfg: cfg, path: cfgPath, paths: DefaultPaths(config.ExecutableDir()), run: ExecRunner()}
 }
 
 func (a *AP) Settings() Settings {

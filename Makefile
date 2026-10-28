@@ -1,5 +1,7 @@
 BIN     := opiz3-router
 HOST    ?= root@172.16.0.1
+# Folder on the device, relative to the login's home, that holds the binary.
+DIR     ?= opiz3-router
 # Version reported by `opiz3-router -version`; taken from the git tag.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
@@ -17,8 +19,8 @@ test:
 # uploaded under a temporary name because a running executable cannot be
 # overwritten in place.
 deploy: build
-	scp $(BIN) $(HOST):/usr/local/bin/$(BIN).new
-	ssh $(HOST) 'mv /usr/local/bin/$(BIN).new /usr/local/bin/$(BIN) && systemctl restart $(BIN)'
+	scp $(BIN) $(HOST):$(DIR)/$(BIN).new
+	ssh $(HOST) 'mv $(DIR)/$(BIN).new $(DIR)/$(BIN) && systemctl restart $(BIN)'
 
 # Publish a release: `make release TAG=v1.0.1`. Pushing the tag starts the
 # release workflow, which tests, builds and publishes it.

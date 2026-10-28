@@ -44,7 +44,7 @@
   "mini_net_man": {
     "url": "http://127.0.0.1:8080",
     "token": "",
-    "dir": "/opt/mini-net-man"
+    "dir": ""
   },
   "dhcp_leases_file": "/var/lib/misc/dnsmasq.leases"
 }

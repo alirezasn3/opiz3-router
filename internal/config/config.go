@@ -17,7 +17,24 @@ import (
 	"strings"
 )
 
-const DefaultPath = "/etc/opiz3-router/config.json"
+// ConfigName is the config file's name; it sits next to the binary.
+const ConfigName = "config.json"
+
+// ExecutableDir is the folder of the running binary (symlinks resolved), where
+// the config file and the router's other files live.
+func ExecutableDir() string {
+	exe, e := os.Executable()
+	if e != nil {
+		return "."
+	}
+	if real, e := filepath.EvalSymlinks(exe); e == nil {
+		exe = real
+	}
+	return filepath.Dir(exe)
+}
+
+// DefaultPath is the config file next to the binary.
+func DefaultPath() string { return filepath.Join(ExecutableDir(), ConfigName) }
 
 type Config struct {
 	Interfaces Interfaces `json:"interfaces"`
@@ -102,8 +119,23 @@ type MiniNetMan struct {
 	URL string `json:"url"`
 	// Token is an API token made by -install (or in mini-net-man's Settings).
 	Token string `json:"token"`
-	// Dir holds the mini-net-man binary and its config.yaml.
+	// Dir holds the mini-net-man binary and its config.yaml. When empty it is
+	// a folder called mini-net-man next to the router's own folder, so
+	// ~/opiz3-router goes with ~/mini-net-man.
 	Dir string `json:"dir"`
+}
+
+// MiniNetManDir is where mini-net-man lives, given the folder of the router's
+// own binary.
+func (c Config) MiniNetManDir(appDir string) string {
+	if c.MiniNetMan.Dir != "" {
+		return c.MiniNetMan.Dir
+	}
+	abs, e := filepath.Abs(appDir)
+	if e != nil {
+		abs = appDir
+	}
+	return filepath.Join(filepath.Dir(abs), "mini-net-man")
 }
 
 type Display struct {
@@ -153,7 +185,6 @@ func Default() Config {
 		WiFi: WiFi{SSID: "OrangePiZero3", Channel: 6},
 		MiniNetMan: MiniNetMan{
 			URL: "http://127.0.0.1:8080",
-			Dir: "/opt/mini-net-man",
 		},
 		DHCPLeasesFile: "/var/lib/misc/dnsmasq.leases",
 	}
@@ -224,7 +255,7 @@ func (c Config) Validate() error {
 	if u, e := url.Parse(c.MiniNetMan.URL); e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("mini_net_man.url must be an http or https URL")
 	}
-	if !filepath.IsAbs(c.MiniNetMan.Dir) {
+	if c.MiniNetMan.Dir != "" && !filepath.IsAbs(c.MiniNetMan.Dir) {
 		return fmt.Errorf("mini_net_man.dir must be an absolute path")
 	}
 	// Names end up in the netplan file; keep them to what interface names use.

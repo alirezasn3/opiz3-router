@@ -38,18 +38,22 @@ Put your tunnel config at `/etc/wireguard/wg0.conf`.
 
 ### 2. Install
 
-Download the binary from the [latest release](https://github.com/alirezasn3/opiz3-router/releases/latest) onto the device, then run `-install` as root. That is the whole setup:
+Download the binary from the [latest release](https://github.com/alirezasn3/opiz3-router/releases/latest) into its own folder (the config is created beside it), then run `-install` as root. That is the whole setup:
 
 ```sh
-curl -fL -o /usr/local/bin/opiz3-router https://github.com/alirezasn3/opiz3-router/releases/latest/download/opiz3-router-linux-arm64
-chmod +x /usr/local/bin/opiz3-router
-sudo /usr/local/bin/opiz3-router -install
+mkdir -p ~/opiz3-router && cd ~/opiz3-router
+curl -fL -o opiz3-router https://github.com/alirezasn3/opiz3-router/releases/latest/download/opiz3-router-linux-arm64
+chmod +x opiz3-router
+sudo ./opiz3-router -install
 ```
 
 Each release also has a `checksums.txt` to verify the download against
 (`sha256sum -c`). To build from source instead, run `make build` on your
 computer and copy `opiz3-router` over.
 
+`-install` creates `config.json` **next to the binary** (unless you pass
+`-config`) and puts mini-net-man in `mini-net-man` next to that folder, so you
+end up with `~/opiz3-router` and `~/mini-net-man`, each with its own config.
 The service runs the binary in place, so keep it where it is; if you move it,
 run `-install` again.
 
@@ -58,20 +62,20 @@ what is not already right. It:
 
 | Step | What it does |
 |---|---|
-| Config | Creates `/etc/opiz3-router/config.json` and, if there is none, a random Wi-Fi passphrase, which it prints at the end. |
+| Config | Creates `config.json` next to the binary and, if there is none, a random Wi-Fi passphrase, which it prints at the end. |
 | Packages | `apt install`s whichever of `wireguard-tools hostapd dnsmasq iw netplan.io nftables` is missing. APT sources are left alone, and no service starts before it is configured. |
 | Display | Adds `overlay_prefix=sun50i-h616` and `overlays=spi1-cs0-spidev` to `/boot/orangepiEnv.txt`, keeping the other lines. This needs a reboot. |
 | Wi-Fi and DHCP | Writes `/etc/hostapd/hostapd.conf` (access point `wlan0`, bridged to `br0`) and `/etc/dnsmasq.d/br0.conf` (DHCP on `br0`), and enables both services. They wait for `br0`, which mini-net-man creates, and retry if it is late. |
 | WireGuard | Enables `wg-quick@wg0` and has systemd retry it if it fails at boot. |
-| mini-net-man | Downloads the latest release for the CPU into `/opt/mini-net-man`, checks it against the release's `checksums.txt`, installs its service, and creates an API token for the router, which it stores in `config.json`. |
-| Network | Moves the image's own files out of `/etc/netplan` (to `/etc/opiz3-router/netplan-backup/`), writes the small fallback `/etc/netplan/opiz3-router.yaml` (DHCP on `end0` and the modem), masks NetworkManager, and lets systemd-networkd take over. The SSH session may drop for a moment. |
+| mini-net-man | Downloads the latest release for the CPU into `~/mini-net-man` (its `config.yaml` is created beside it), checks it against the release's `checksums.txt`, installs its service, and creates an API token for the router, which it stores in `config.json`. |
+| Network | Moves the image's own files out of `/etc/netplan` (to `netplan-backup/` next to the binary), writes the small fallback `/etc/netplan/opiz3-router.yaml` (DHCP on `end0` and the modem), masks NetworkManager, and lets systemd-networkd take over. The SSH session may drop for a moment. |
 | Service | Installs and starts the `opiz3-router` service, after mini-net-man. |
 
 Then reboot if it says so, and check that `/dev/spidev1.0` exists.
 
 Options:
 
-- `-config /path/to/config.json` for a non-default config path.
+- `-config /path/to/config.json` for a config that is not next to the binary.
 - `-mini-net-man /path/to/binary` to use a binary you already copied instead
   of downloading.
 
@@ -99,11 +103,14 @@ up: mini-net-man keeps holding the bridge, firewall and routing.
 
 ## Updating
 
+From the folder the binary is in:
+
 ```sh
-opiz3-router -check-update      # is there a newer release?
-opiz3-router -update            # install the latest release and restart the service
-opiz3-router -update-to v1.0.1  # install that release; it may be older
-opiz3-router -rollback          # go back to the version before the last update
+cd ~/opiz3-router
+./opiz3-router -check-update       # is there a newer release?
+sudo ./opiz3-router -update        # install the latest release and restart the service
+sudo ./opiz3-router -update-to v1.0.1   # install that release; it may be older
+sudo ./opiz3-router -rollback      # go back to the version before the last update
 ```
 
 `-update` downloads the release's binary, checks it against `checksums.txt`,
@@ -111,12 +118,14 @@ test-runs it (it has to report the release's version), and only then swaps it
 in. The previous binary stays next to it as `opiz3-router.old`, which is what
 `-rollback` uses. `-force` installs even when the version is already current,
 or when the running build is a local one that has no release version, and
-`-no-restart` leaves the restart to you. Run it as root.
+`-no-restart` leaves the restart to you. The update replaces the binary in
+its own folder, and the restart needs root.
 
 Updating replaces the program only. If a release's notes mention changes to the
-system setup, run `opiz3-router -install` once more.
+system setup, run `sudo ./opiz3-router -install` once more.
 
-To try a build from your computer without a release: `make deploy HOST=root@<device-ip>`.
+To try a build from your computer without a release: `make deploy HOST=root@<device-ip>`
+(it goes to `~/opiz3-router` of the user you log in as; `DIR=` changes the folder).
 
 ## Releases
 
@@ -140,8 +149,8 @@ login.
 ## Config
 
 Every setting has a default that matches the reference hardware, and
-`deploy/config.example.json` lists them all. `/etc/opiz3-router/config.json`
-only needs the values you change. For example, to turn off the kill switch and
+`deploy/config.example.json` lists them all. `config.json` next to the binary
+(`~/opiz3-router/config.json`) only needs the values you change. For example, to turn off the kill switch and
 put a password on the panel:
 
 ```json
@@ -268,7 +277,7 @@ this stays in place when the `opiz3-router` service stops.
 
 mini-net-man's own panel is at `http://172.16.0.1:8080/` from the LAN (the
 login was printed by `-install`; change it with
-`/opt/mini-net-man/mini-net-man passwd admin`). Check the setup with
+`~/mini-net-man/mini-net-man passwd admin`). Check the setup with
 `ip rule`, `ip route show table 200` and `nft list table inet mini-net-man`.
 
 ## Web panel

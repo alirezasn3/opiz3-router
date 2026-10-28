@@ -127,3 +127,23 @@ func TestMiniNetManPort(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigLivesNextToTheBinary(t *testing.T) {
+	if got, want := filepath.Dir(DefaultPath()), ExecutableDir(); got != want {
+		t.Fatalf("config in %q, binary in %q", got, want)
+	}
+	if filepath.Base(DefaultPath()) != "config.json" {
+		t.Fatalf("path = %q", DefaultPath())
+	}
+}
+
+func TestMiniNetManDirDefaultsToNextToTheAppFolder(t *testing.T) {
+	c := Default()
+	if got := c.MiniNetManDir("/home/pi/opiz3-router"); got != "/home/pi/mini-net-man" {
+		t.Fatalf("dir = %q", got)
+	}
+	c.MiniNetMan.Dir = "/srv/mnm"
+	if got := c.MiniNetManDir("/home/pi/opiz3-router"); got != "/srv/mnm" {
+		t.Fatalf("dir = %q", got)
+	}
+}

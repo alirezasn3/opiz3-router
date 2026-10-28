@@ -30,7 +30,7 @@ var loginLine = regexp.MustCompile(`login:\s+(\S+) / (\S+)`)
 // installMiniNetMan puts mini-net-man's binary in its own folder, installs and
 // starts its service, and gets an API token for the router.
 func (in *Installer) installMiniNetMan(ctx context.Context) error {
-	dir := in.Cfg.MiniNetMan.Dir
+	dir := in.MiniNetManDir()
 	bin := filepath.Join(dir, "mini-net-man")
 	if e := os.MkdirAll(dir, 0o755); e != nil {
 		return e

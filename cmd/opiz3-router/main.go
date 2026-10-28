@@ -65,7 +65,7 @@ func every(ctx context.Context, d time.Duration, fn func()) {
 }
 
 func main() {
-	configPath := flag.String("config", config.DefaultPath, "path to the JSON config file (optional)")
+	configPath := flag.String("config", "", "path to the JSON config file (default: config.json next to the binary)")
 	install := flag.Bool("install", false, "prepare the system, install mini-net-man and the systemd service, then exit")
 	uninstall := flag.Bool("uninstall", false, "remove the systemd service and exit (the system changes made by -install stay)")
 	mnmBinary := flag.String("mini-net-man", "", "with -install: use this mini-net-man binary instead of downloading the latest release")
@@ -77,6 +77,9 @@ func main() {
 	force := flag.Bool("force", false, "with -update: install even if already up to date")
 	noRestart := flag.Bool("no-restart", false, "with -update or -rollback: do not restart the service")
 	flag.Parse()
+	if *configPath == "" {
+		*configPath = config.DefaultPath()
+	}
 
 	if *showVersion {
 		fmt.Println("opiz3-router", version)
