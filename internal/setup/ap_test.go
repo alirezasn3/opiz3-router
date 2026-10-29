@@ -160,3 +160,31 @@ func TestAPUpdate(t *testing.T) {
 		t.Fatalf("a rejected update changed the settings: %+v", got)
 	}
 }
+
+func TestAPUpdateKeepsOtherSettingsChangedMeanwhile(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Default()
+	cfg.WiFi.Passphrase = "correct horse"
+	if e := cfg.Save(cfgPath); e != nil {
+		t.Fatal(e)
+	}
+	ap := NewAP(cfg, cfgPath)
+	ap.paths, ap.run = testPaths(t), &fakeRunner{}
+
+	// Another card changes the file after the router started.
+	if _, e := config.Modify(cfgPath, func(c *config.Config) { c.MiniNetMan.Enforce = false; c.Update.AutoCheck = false }); e != nil {
+		t.Fatal(e)
+	}
+	s := ap.Settings()
+	s.SSID = "Home"
+	if e := ap.Update(context.Background(), s); e != nil {
+		t.Fatal(e)
+	}
+	saved, e := config.Load(cfgPath)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if saved.WiFi.SSID != "Home" || saved.MiniNetMan.Enforce || saved.Update.AutoCheck {
+		t.Fatalf("saved = ssid %q, enforce %v, auto check %v", saved.WiFi.SSID, saved.MiniNetMan.Enforce, saved.Update.AutoCheck)
+	}
+}

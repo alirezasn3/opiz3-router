@@ -2,6 +2,7 @@ package mnm
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -293,5 +294,193 @@ func TestPublishWhenMiniNetManRefusesOrIsGone(t *testing.T) {
 	}
 	if r = store.Snapshot().Routing; r.Synced || !strings.Contains(r.Error, "cannot reach mini-net-man") {
 		t.Fatalf("routing = %+v", r)
+	}
+}
+
+func TestHandsOffLeavesEditsAndAdditionsAlone(t *testing.T) {
+	f, client := newFakeAPI(t)
+	cfg := config.Default()
+	s := NewSyncer(cfg, client, state.NewStore())
+	if _, e := s.Apply(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+
+	s.SetEnforce(false)
+	// The user edits one of the router's rules, deletes another, and adds
+	// their own, in the middle of the chain.
+	f.mu.Lock()
+	rules := f.lists["firewall/rules"]
+	rules[0]["dst_port"] = "2222"
+	f.lists["firewall/rules"] = append(append([]map[string]any{}, rules[:3]...), rules[4:]...)
+	f.lists["firewall/rules"] = append(f.lists["firewall/rules"], map[string]any{"id": "mine", "chain": "forward", "action": "accept", "comment": "port forward"})
+	before := len(f.lists["firewall/rules"])
+	f.mu.Unlock()
+	f.resetWrites()
+
+	for range 2 {
+		if _, e := s.Apply(context.Background()); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if n := f.writeCount(); n != 0 {
+		t.Fatalf("hands-off sync changed things: %v", f.writes)
+	}
+	if got := len(f.lists["firewall/rules"]); got != before || f.lists["firewall/rules"][0]["dst_port"] != "2222" {
+		t.Fatalf("rules = %v", f.lists["firewall/rules"])
+	}
+
+	// Enforcing again puts the router's rules back and keeps the user's.
+	s.SetEnforce(true)
+	if _, e := s.Apply(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	got := f.comments("firewall/rules")
+	if !slices.Contains(got, "port forward") || len(got) != len(Build(cfg, false).Firewall)+1 {
+		t.Fatalf("after enforcing: %q", got)
+	}
+	if f.lists["firewall/rules"][slices.Index(got, "panel-80-br0")]["dst_port"] != "80" {
+		t.Fatal("the edited rule was not put back")
+	}
+}
+
+func TestHandsOffStillSetsUpAnEmptyMiniNetMan(t *testing.T) {
+	f, client := newFakeAPI(t)
+	cfg := config.Default()
+	cfg.MiniNetMan.Enforce = false
+	s := NewSyncer(cfg, client, state.NewStore())
+	ch, e := s.Apply(context.Background())
+	if e != nil || ch.Created == 0 {
+		t.Fatalf("first sync = %+v, %v", ch, e)
+	}
+	if f.sysctl["ip_forward"] != true {
+		t.Fatalf("forwarding not enabled on setup: %v", f.sysctl)
+	}
+
+	// A router that starts later leaves what is there alone.
+	f.mu.Lock()
+	f.lists["rules"][0]["priority"] = 5
+	f.mu.Unlock()
+	f.resetWrites()
+	if _, e = NewSyncer(cfg, client, state.NewStore()).Apply(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if f.writeCount() != 0 {
+		t.Fatalf("restart changed things: %v", f.writes)
+	}
+}
+
+func TestHandsOffKeepsReportingAndSwitchesThePort(t *testing.T) {
+	f, client := newFakeAPI(t)
+	cfg := config.Default()
+	store := state.NewStore()
+	s := NewSyncer(cfg, client, store)
+	if _, e := s.Apply(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	s2 := NewSyncer(func() config.Config { c := cfg; c.MiniNetMan.Enforce = false; return c }(), client, store)
+	f.resetWrites()
+	if _, e := s2.Apply(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if r := store.Snapshot().Routing; !r.Synced || r.Enforce || r.VPN != "up" {
+		t.Fatalf("routing = %+v", r)
+	}
+
+	// An issue with one of the router's items is still reported.
+	f.mu.Lock()
+	f.issues = []Issue{{Kind: "route", ID: f.lists["routes"][0]["id"].(string), Message: "no such interface"}}
+	f.mu.Unlock()
+	s2.mu.Lock()
+	s2.publishLocked(context.Background())
+	s2.mu.Unlock()
+	if r := store.Snapshot().Routing; len(r.Issues) != 1 {
+		t.Fatalf("issues = %v", r.Issues)
+	}
+
+	// The port moves in and out of the bridge, and nothing else changes.
+	if e := s2.SetLAN(context.Background(), true); e != nil {
+		t.Fatal(e)
+	}
+	if f.writeCount() != 1 || f.writes[0] != "PUT /api/bridges/"+f.lists["bridges"][0]["id"].(string) {
+		t.Fatalf("writes = %v", f.writes)
+	}
+	if ports, _ := f.lists["bridges"][0]["ports"].([]any); len(ports) != 1 {
+		t.Fatalf("bridge = %v", f.lists["bridges"][0])
+	}
+}
+
+func TestRestorePutsTheSetupBackWhileHandsOff(t *testing.T) {
+	f, client := newFakeAPI(t)
+	cfg := config.Default()
+	cfg.MiniNetMan.Enforce = false
+	s := NewSyncer(cfg, client, state.NewStore())
+	if _, e := s.Apply(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	f.mu.Lock()
+	f.lists["addresses"][0]["address"] = "192.168.9.1/24"
+	f.mu.Unlock()
+	if ch, e := s.Apply(context.Background()); e != nil || ch.Total() != 0 {
+		t.Fatalf("hands-off sync = %+v, %v", ch, e)
+	}
+	ch, e := s.Restore(context.Background())
+	if e != nil || ch.Updated != 1 {
+		t.Fatalf("restore = %+v, %v", ch, e)
+	}
+	if f.lists["addresses"][0]["address"] != "172.16.0.1/12" {
+		t.Fatalf("address = %v", f.lists["addresses"][0])
+	}
+	if s.Enforcing() {
+		t.Fatal("restoring turned enforcing on")
+	}
+}
+
+func TestCopiesOfManagedItemsAreLeftAlone(t *testing.T) {
+	f, client := newFakeAPI(t)
+	s := NewSyncer(config.Default(), client, state.NewStore())
+	if _, e := s.Apply(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	// Cloning a rule in the panel copies its comment too.
+	f.mu.Lock()
+	clone := map[string]any{}
+	for k, v := range f.lists["firewall/rules"][2] {
+		clone[k] = v
+	}
+	clone["id"], clone["dst_port"] = "clone", "2222"
+	f.lists["firewall/rules"] = append(f.lists["firewall/rules"], clone)
+	f.mu.Unlock()
+	f.resetWrites()
+	for range 2 {
+		if _, e := s.Apply(context.Background()); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if f.writeCount() != 0 {
+		t.Fatalf("the router touched a copy: %v", f.writes)
+	}
+}
+
+func TestRulesControllerSavesTheSetting(t *testing.T) {
+	_, client := newFakeAPI(t)
+	cfg := config.Default()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if e := cfg.Save(path); e != nil {
+		t.Fatal(e)
+	}
+	s := NewSyncer(cfg, client, state.NewStore())
+	r := NewRules(s, path)
+	if e := r.SetEnforce(context.Background(), false); e != nil {
+		t.Fatal(e)
+	}
+	saved, e := config.Load(path)
+	if e != nil || saved.MiniNetMan.Enforce || s.Enforcing() {
+		t.Fatalf("saved %v, enforcing %v, err %v", saved.MiniNetMan.Enforce, s.Enforcing(), e)
+	}
+	if e = r.SetEnforce(context.Background(), true); e != nil || !s.Enforcing() {
+		t.Fatalf("enforcing %v, err %v", s.Enforcing(), e)
+	}
+	if e = r.Restore(context.Background()); e != nil {
+		t.Fatal(e)
 	}
 }

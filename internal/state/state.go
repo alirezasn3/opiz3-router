@@ -29,6 +29,7 @@ type Snapshot struct {
 	Notifications []Notification `json:"notifications"`
 	System        System         `json:"system"`
 	Routing       Routing        `json:"routing"`
+	Update        Update         `json:"update"`
 	// Traffic is the VPN throughput history, oldest first.
 	Traffic []TrafficSample `json:"traffic"`
 }
@@ -186,9 +187,36 @@ type System struct {
 	TemperatureC *float64 `json:"temperature_c"`
 }
 
+// Update is the state of the router's own software: the running version, the
+// latest release found, and whether an update is in progress.
+type Update struct {
+	Current string `json:"current"`
+	// Latest is the newest release found by the last check, empty before one.
+	Latest string `json:"latest,omitempty"`
+	// Comparable is false for a local build, which has no release version to
+	// compare with Latest.
+	Comparable bool `json:"comparable"`
+	// Available is true when Latest is newer than Current.
+	Available bool      `json:"available"`
+	URL       string    `json:"url,omitempty"`
+	Notes     string    `json:"notes,omitempty"`
+	CheckedAt time.Time `json:"checked_at,omitzero"`
+	// Busy names what is going on: "checking", "installing" or "rolling back".
+	Busy string `json:"busy,omitempty"`
+	// Installed is the release that was just installed and waits for the
+	// service to restart into it.
+	Installed string `json:"installed,omitempty"`
+	// CanRollback is true when the previous version is still on disk.
+	CanRollback bool   `json:"can_rollback"`
+	Error       string `json:"error,omitempty"`
+}
+
 // Routing is how the firewall, NAT and VPN routing held by mini-net-man are
 // doing.
 type Routing struct {
+	// Enforce is true while the router keeps mini-net-man's rules equal to its
+	// own. When false, the rules can be edited in mini-net-man's panel.
+	Enforce bool `json:"enforce"`
 	// Synced is true when mini-net-man holds the router's config and answers.
 	Synced   bool      `json:"synced"`
 	SyncedAt time.Time `json:"synced_at,omitzero"`
@@ -222,7 +250,7 @@ func NewStore() *Store {
 	return &Store{
 		snap: Snapshot{
 			Display: Display{Powered: true, WakeOnNotification: true},
-			Routing: Routing{VPN: "unknown"},
+			Routing: Routing{VPN: "unknown", Enforce: true},
 		},
 		subs: map[chan struct{}]struct{}{},
 	}

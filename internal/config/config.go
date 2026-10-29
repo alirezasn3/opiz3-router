@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ConfigName is the config file's name; it sits next to the binary.
@@ -45,6 +46,7 @@ type Config struct {
 	Network    Network    `json:"network"`
 	WiFi       WiFi       `json:"wifi"`
 	MiniNetMan MiniNetMan `json:"mini_net_man"`
+	Update     Update     `json:"update"`
 	// DHCPLeasesFile is read to list LAN clients.
 	DHCPLeasesFile string `json:"dhcp_leases_file"`
 }
@@ -123,6 +125,17 @@ type MiniNetMan struct {
 	// a folder called mini-net-man next to the router's own folder, so
 	// ~/opiz3-router goes with ~/mini-net-man.
 	Dir string `json:"dir"`
+	// Enforce keeps mini-net-man's rules equal to the router's: anything
+	// removed or edited is put back. Turn it off to edit the rules in
+	// mini-net-man's panel; the router then only sets them up once.
+	Enforce bool `json:"enforce"`
+}
+
+// Update controls how the router finds new releases.
+type Update struct {
+	// AutoCheck looks for a new release now and then (GitHub is asked about
+	// the latest release; nothing is installed without a click).
+	AutoCheck bool `json:"auto_check"`
 }
 
 // MiniNetManDir is where mini-net-man lives, given the folder of the router's
@@ -184,8 +197,10 @@ func Default() Config {
 		},
 		WiFi: WiFi{SSID: "OrangePiZero3", Channel: 6},
 		MiniNetMan: MiniNetMan{
-			URL: "http://127.0.0.1:8080",
+			URL:     "http://127.0.0.1:8080",
+			Enforce: true,
 		},
+		Update:         Update{AutoCheck: true},
 		DHCPLeasesFile: "/var/lib/misc/dnsmasq.leases",
 	}
 }
@@ -323,6 +338,26 @@ func validInterfaceName(s string) bool {
 		}
 	}
 	return true
+}
+
+var modifyMu sync.Mutex
+
+// Modify changes the config file: it reads the file, applies fn, checks the
+// result and writes it back. Unlike Save of a config held in memory, it keeps
+// whatever else changed in the file since, so the panel's different cards
+// cannot undo each other.
+func Modify(path string, fn func(*Config)) (Config, error) {
+	modifyMu.Lock()
+	defer modifyMu.Unlock()
+	c, e := Load(path)
+	if e != nil {
+		return c, e
+	}
+	fn(&c)
+	if e = c.Validate(); e != nil {
+		return c, e
+	}
+	return c, c.Save(path)
 }
 
 // Save writes the config to path, replacing the file atomically. The file

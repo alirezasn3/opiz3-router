@@ -121,6 +121,21 @@ or when the running build is a local one that has no release version, and
 `-no-restart` leaves the restart to you. The update replaces the binary in
 its own folder, and the restart needs root.
 
+The panel's **Software update** card does the same. It shows the running
+version and the latest release, with **Check now**, **Install vX.Y.Z** (when a
+newer release exists, with its notes) and **Go back to the previous version**.
+Installing restarts the service a moment after the answer goes out; the page
+reloads itself when the new version is up, and routing and the firewall stay in
+place meanwhile. Every 12 hours (and 45 seconds after the router starts) it asks
+GitHub for the latest release and logs when one is newer. Nothing is installed
+without a click. Set `update.auto_check` to `false` to stop the checks. A local
+build (from `make build`) has no release version to compare, so the card only
+shows the latest release; update it with `-update -force`.
+
+Anyone who can open the panel can install an update, so set `panel.password` on
+a shared LAN. Only the repository's own releases are installed, checked against
+`checksums.txt`.
+
 Updating replaces the program only. If a release's notes mention changes to the
 system setup, run `sudo ./opiz3-router -install` once more.
 
@@ -159,6 +174,9 @@ put a password on the panel:
   "panel": { "password": "choose-one" }
 }
 ```
+
+`mini_net_man.enforce` and `update.auto_check` can be changed from the panel
+too.
 
 The file holds the Wi-Fi passphrase and the mini-net-man token, so it is only
 readable by root. The panel's Wi-Fi card rewrites it (with every setting
@@ -272,8 +290,31 @@ this stays in place when the `opiz3-router` service stops.
   `wg0` is masqueraded, and TCP MSS is clamped to the path MTU.
 - A port forward (DNAT) into the LAN has to be added above the router's
   `forward-to-lan` drop rule in mini-net-man's panel, or it is dropped too.
+  See "Editing the rules yourself" below.
 - Nothing restarts `wg-quick` any more. systemd retries it if it fails, and
   `PersistentKeepalive` brings the tunnel back after the uplink changes.
+
+### Editing the rules yourself
+
+Rules you add in mini-net-man's panel (items without the `opiz3-router:`
+comment) are never touched, and neither is a copy you make of one of the
+router's rules. But while **Keep the router's rules in place** is on (the
+default), the router puts back its own rules that you remove or edit, within
+30 seconds, and resets IP forwarding and BBR when mini-net-man restarts.
+
+To change those rules by hand, turn the option off in the panel's
+**mini-net-man rules** card, or set `mini_net_man.enforce` to `false`. The
+router then leaves mini-net-man alone:
+
+- it sets its rules up once, only on a mini-net-man that has none of them yet;
+- it never edits, deletes or recreates anything afterwards, including a rule
+  you deleted on purpose;
+- it still shows the VPN health check and any rule that could not be applied,
+  and moving the Ethernet port in or out of the bridge still works.
+
+**Restore the router's rules** puts them back once (undoing your edits to them
+and recreating deleted ones) and leaves the option as it is. Turning the option
+on again does the same within 30 seconds.
 
 mini-net-man's own panel is at `http://172.16.0.1:8080/` from the LAN (the
 login was printed by `-install`; change it with
@@ -287,7 +328,8 @@ the LAN. It shows VPN protection state, live tunnel throughput, uplinks, the
 4G modem, SMS messages from the modem's inbox, a log of the last 100
 notifications, connected clients, whether mini-net-man holds the router's
 setup, and system health. It also changes the Wi-Fi settings and the Ethernet
-port mode. Everything else about the network is in mini-net-man's panel.
+port mode, decides whether the router keeps mini-net-man's rules in place, and
+updates the software. Everything else about the network is in mini-net-man's panel.
 
 The notification log covers link changes of the router's interfaces, VPN state
 changes, new SMS, and losing or regaining contact with mini-net-man. It is kept in memory, so it starts

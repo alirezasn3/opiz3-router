@@ -137,6 +137,41 @@
       <p class="note">Saving restarts the access point, so Wi-Fi devices (including this one) reconnect within a few seconds.</p>
     </section>
 
+    <section class="card card-wide" aria-labelledby="rules-title">
+      <div class="card-title-row">
+        <div>
+          <h2 id="rules-title">mini-net-man rules</h2>
+          <span class="muted" id="rules-status"></span>
+        </div>
+        <div class="card-actions">
+          <label class="toggle-label" title="Off: you can edit and add rules in mini-net-man's panel and the router leaves them alone">
+            <input type="checkbox" id="rules-enforce" checked>
+            <span>Keep the router's rules in place</span>
+          </label>
+          <button type="button" class="btn btn-sm" id="rules-restore">Restore the router's rules</button>
+        </div>
+      </div>
+      <p class="note" id="rules-note" hidden></p>
+      <p class="note">While this is on, the router puts back any of its rules that you remove or edit in mini-net-man's panel, every 30 seconds. Turn it off to change the rules by hand; the router then leaves mini-net-man alone, apart from moving the Ethernet port in and out of the bridge. Restore puts the router's rules back once.</p>
+    </section>
+
+    <section class="card card-wide" aria-labelledby="update-title">
+      <div class="card-title-row">
+        <div>
+          <h2 id="update-title">Software update</h2>
+          <span class="muted" id="update-status"></span>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn btn-sm" id="update-check">Check now</button>
+          <button type="button" class="btn btn-sm btn-primary" id="update-install" hidden>Install</button>
+          <button type="button" class="btn btn-sm" id="update-rollback" hidden>Go back to the previous version</button>
+        </div>
+      </div>
+      <p class="note" id="update-note" hidden></p>
+      <dl class="facts" id="update-facts"></dl>
+      <pre class="release-notes" id="update-notes" hidden></pre>
+    </section>
+
     <section class="card card-wide" aria-labelledby="eth-title">
       <div class="card-title-row">
         <h2 id="eth-title">Ethernet port</h2>

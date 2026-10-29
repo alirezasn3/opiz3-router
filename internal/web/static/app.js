@@ -100,6 +100,8 @@ function render(snap) {
   renderWireGuard(snap, now);
   renderModem(snap);
   renderRouting(snap);
+  renderRules(snap);
+  renderUpdate(snap, now);
   renderInterfaces(snap);
   renderSMS(snap, now);
   renderLog(snap, now);
@@ -250,6 +252,91 @@ function renderRouting(snap) {
     items.push(el("li", {}, statusBadge("warning", "Not applied yet"), el("span", { class: "check-desc", text: issue })));
   }
   $("routing-checks").replaceChildren(...items);
+}
+
+// ---- mini-net-man rules ----
+
+let rulesBusy = false;
+
+function renderRules(snap) {
+  const enforce = snap.routing.enforce !== false;
+  const box = $("rules-enforce");
+  if (box && !rulesBusy) box.checked = enforce;
+  $("rules-status").textContent = enforce ? "The router keeps its rules in place" : "Hands off: edit the rules in mini-net-man's panel";
+  $("rules-restore").disabled = rulesBusy;
+}
+
+// ---- software update ----
+
+let bootVersion = null;
+
+function safeLink(url) {
+  return typeof url === "string" && url.startsWith("https://") ? url : null;
+}
+
+function renderUpdate(snap, now) {
+  const u = snap.update;
+  if (bootVersion === null) bootVersion = u.current;
+  // The service restarted into another version; the panel's own files changed too.
+  if (u.current !== bootVersion) { location.reload(); return; }
+
+  let badge;
+  if (u.busy) badge = statusBadge("neutral", { checking: "Checking…", installing: "Installing…", "rolling back": "Going back…" }[u.busy] || u.busy);
+  else if (u.installed) badge = statusBadge("warning", `Installed ${u.installed}, restarting`);
+  else if (!u.comparable) badge = statusBadge("neutral", "Local build");
+  else if (!u.latest) badge = statusBadge("neutral", "Not checked yet");
+  else if (u.available) badge = statusBadge("info", `${u.latest} is available`);
+  else badge = statusBadge("good", "Up to date");
+
+  const release = safeLink(u.url);
+  fillFacts($("update-facts"), [
+    ["Running", el("span", { class: "mono", text: u.current || "–" })],
+    ["Status", badge],
+    u.latest && ["Latest release", release ? el("a", { href: release, target: "_blank", rel: "noopener noreferrer", class: "mono", text: u.latest }) : el("span", { class: "mono", text: u.latest })],
+    ["Last checked", fmtAgo(parseTime(u.checked_at), now)],
+  ]);
+  $("update-status").textContent = "";
+
+  const note = $("update-note");
+  let noteText = u.error || "";
+  if (!noteText && !u.comparable) noteText = "This is a local build with no release version, so it can't tell if a release is newer. Update it with: opiz3-router -update -force";
+  if (!noteText && u.installed) noteText = "The router restarts for a few seconds; this page reloads by itself. Routing and the firewall stay in place meanwhile.";
+  note.hidden = !noteText;
+  note.textContent = noteText;
+
+  const idle = !u.busy && !u.installed && !updateAction;
+  $("update-check").disabled = !idle;
+  const install = $("update-install");
+  install.hidden = !(u.available && !u.installed);
+  install.disabled = !idle;
+  install.textContent = u.latest ? `Install ${u.latest}` : "Install";
+  const back = $("update-rollback");
+  back.hidden = !(u.can_rollback && !u.installed);
+  back.disabled = !idle;
+
+  const notes = $("update-notes");
+  notes.hidden = !(u.available && u.notes && !u.installed);
+  notes.textContent = u.notes || "";
+}
+
+let updateAction = null;
+
+async function runUpdateAction(label, path, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  updateAction = label;
+  if (latest) renderUpdate(latest, parseTime(latest.time) ?? Date.now());
+  try {
+    await postAction(path, {});
+  } catch (e) {
+    // The service may already be restarting; the live connection brings the new state.
+    if (!(e instanceof TypeError)) {
+      const note = $("update-note");
+      note.hidden = false;
+      note.textContent = e.message;
+    }
+  }
+  updateAction = null;
+  if (latest) renderUpdate(latest, parseTime(latest.time) ?? Date.now());
 }
 
 function feedTime(t, now) {
@@ -529,6 +616,49 @@ document.querySelectorAll(".mode-option").forEach((opt) => opt.addEventListener(
 $("eth-keep").addEventListener("click", () => runEthAction("Keeping…", "api/network/keep"));
 $("eth-undo").addEventListener("click", () => runEthAction("Undoing…", "api/network/undo"));
 setInterval(() => { if (latest && latest.network.pending) renderEthernet(latest); }, 1000);
+
+$("update-check").addEventListener("click", () => runUpdateAction("Checking…", "api/update/check"));
+$("update-install").addEventListener("click", () => runUpdateAction("Installing…", "api/update/install",
+  `Install ${latest && latest.update.latest}?\n\nThe router downloads it, checks it and restarts, which takes a few seconds. Routing and the firewall stay in place while it restarts, but the panel and the display go away for a moment. The previous version is kept so you can go back.`));
+$("update-rollback").addEventListener("click", () => runUpdateAction("Going back…", "api/update/rollback",
+  "Go back to the previous version? The router restarts for a few seconds."));
+
+$("rules-enforce").addEventListener("change", async (ev) => {
+  const on = ev.target.checked;
+  const text = on
+    ? "Keep the router's rules in place?\n\nWithin 30 seconds the router puts back any of its rules that you removed or edited in mini-net-man. Your own rules stay."
+    : "Let the router leave mini-net-man's rules alone?\n\nYou can then edit them in mini-net-man's panel. Nothing is put back until you turn this on again or restore them.";
+  if (!confirm(text)) { ev.target.checked = !on; return; }
+  rulesBusy = true;
+  const note = $("rules-note");
+  note.hidden = true;
+  try {
+    await postAction("api/rules/enforce", { enabled: on });
+  } catch (e) {
+    ev.target.checked = !on;
+    note.hidden = false;
+    note.textContent = e.message;
+  }
+  rulesBusy = false;
+  if (latest) renderRules(latest);
+});
+
+$("rules-restore").addEventListener("click", async () => {
+  if (!confirm("Put the router's rules back in mini-net-man now?\n\nIt removes your edits to them and recreates any that you deleted. Rules you added yourself stay.")) return;
+  rulesBusy = true;
+  const note = $("rules-note");
+  note.hidden = true;
+  try {
+    await postAction("api/rules/restore", {});
+    note.hidden = false;
+    note.textContent = "The router's rules are back in place.";
+  } catch (e) {
+    note.hidden = false;
+    note.textContent = e.message;
+  }
+  rulesBusy = false;
+  if (latest) renderRules(latest);
+});
 
 // ---- Wi-Fi access point ----
 

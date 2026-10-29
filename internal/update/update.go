@@ -367,9 +367,17 @@ func Executable() (string, error) {
 	return exe, nil
 }
 
-// RestartService restarts the systemd unit.
-func RestartService(name string) error {
-	out, e := exec.Command("systemctl", "restart", name).CombinedOutput()
+// UnderSystemd reports whether this process was started by systemd.
+func UnderSystemd() bool { return os.Getenv("INVOCATION_ID") != "" }
+
+// RestartService restarts the systemd unit. With noBlock it only queues the
+// restart and returns, which is what a service restarting itself needs.
+func RestartService(name string, noBlock bool) error {
+	args := []string{"restart"}
+	if noBlock {
+		args = append(args, "--no-block")
+	}
+	out, e := exec.Command("systemctl", append(args, name)...).CombinedOutput()
 	if e != nil {
 		return fmt.Errorf("systemctl restart %s: %v: %s", name, e, strings.TrimSpace(string(out)))
 	}

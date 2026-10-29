@@ -38,6 +38,11 @@ type Options struct {
 	Network NetworkSwitcher
 	// Display, when set, lets the panel choose whether the display is on or off.
 	Display DisplayController
+	// Updater, when set, lets the panel check for, install and undo updates.
+	Updater UpdateController
+	// Rules, when set, lets the panel choose whether the router keeps
+	// mini-net-man's rules equal to its own.
+	Rules RulesController
 	// WiFi, when set, lets the panel change the access point and DHCP settings.
 	WiFi WiFiController
 	// Scanner, when set, lets the panel trigger network discovery scans.
@@ -48,6 +53,19 @@ type Options struct {
 type DisplayController interface {
 	SetDisplayPower(on bool) error
 	SetWakeOnNotification(enabled bool) error
+}
+
+// UpdateController updates the router's own software.
+type UpdateController interface {
+	Check(ctx context.Context) error
+	Install(ctx context.Context) error
+	Rollback(ctx context.Context) error
+}
+
+// RulesController decides who owns mini-net-man's rules.
+type RulesController interface {
+	SetEnforce(ctx context.Context, on bool) error
+	Restore(ctx context.Context) error
 }
 
 // WiFiController reads and changes the access point and DHCP settings.
@@ -142,6 +160,26 @@ func NewHandler(store *state.Store, opts Options) http.Handler {
 			}
 			return d.SetWakeOnNotification(*body.Enabled)
 		}))
+	}
+	if u := opts.Updater; u != nil {
+		mux.Handle("POST /api/update/check", action(func(r *http.Request) error { return u.Check(r.Context()) }))
+		mux.Handle("POST /api/update/install", action(func(r *http.Request) error { return u.Install(r.Context()) }))
+		mux.Handle("POST /api/update/rollback", action(func(r *http.Request) error { return u.Rollback(r.Context()) }))
+	}
+	if rc := opts.Rules; rc != nil {
+		mux.Handle("POST /api/rules/enforce", action(func(r *http.Request) error {
+			var body struct {
+				Enabled *bool `json:"enabled"`
+			}
+			if e := json.NewDecoder(r.Body).Decode(&body); e != nil {
+				return fmt.Errorf("invalid request: %w", e)
+			}
+			if body.Enabled == nil {
+				return errors.New("missing enabled field")
+			}
+			return rc.SetEnforce(r.Context(), *body.Enabled)
+		}))
+		mux.Handle("POST /api/rules/restore", action(func(r *http.Request) error { return rc.Restore(r.Context()) }))
 	}
 	if w := opts.WiFi; w != nil {
 		mux.HandleFunc("GET /api/wifi", func(rw http.ResponseWriter, r *http.Request) {

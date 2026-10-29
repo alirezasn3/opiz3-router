@@ -327,3 +327,92 @@ func TestNetworkScanAction(t *testing.T) {
 		t.Fatalf("scans = %d, want 1", sc.scans)
 	}
 }
+
+type fakeUpdater struct {
+	calls []string
+	err   error
+}
+
+func (f *fakeUpdater) Check(context.Context) error { f.calls = append(f.calls, "check"); return f.err }
+func (f *fakeUpdater) Install(context.Context) error {
+	f.calls = append(f.calls, "install")
+	return f.err
+}
+func (f *fakeUpdater) Rollback(context.Context) error {
+	f.calls = append(f.calls, "rollback")
+	return f.err
+}
+
+func TestUpdateActions(t *testing.T) {
+	u := &fakeUpdater{}
+	h := NewHandler(state.NewStore(), Options{Updater: u})
+	for _, name := range []string{"check", "install", "rollback"} {
+		if rec := post(t, h, "/api/update/"+name, `{}`, nil); rec.Code != http.StatusAccepted {
+			t.Fatalf("%s: status %d %s", name, rec.Code, rec.Body)
+		}
+	}
+	if strings.Join(u.calls, ",") != "check,install,rollback" {
+		t.Fatalf("calls = %v", u.calls)
+	}
+	u.err = errors.New("already up to date (v1.0.0)")
+	rec := post(t, h, "/api/update/install", `{}`, nil)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "already up to date") {
+		t.Fatalf("error: status %d %s", rec.Code, rec.Body)
+	}
+	// Another web page must not be able to install an update through the browser.
+	u.calls = nil
+	for _, path := range []string{"check", "install", "rollback"} {
+		if rec := post(t, h, "/api/update/"+path, `{}`, map[string]string{"Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-site %s: status %d", path, rec.Code)
+		}
+	}
+	if len(u.calls) != 0 {
+		t.Fatalf("cross-site requests ran: %v", u.calls)
+	}
+	if rec := httptest.NewRecorder(); true {
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "http://172.16.0.1/api/update/install", nil))
+		if rec.Code == http.StatusAccepted || len(u.calls) != 0 {
+			t.Fatalf("a GET installed an update: %d %v", rec.Code, u.calls)
+		}
+	}
+}
+
+type fakeRules struct {
+	enforce []bool
+	restore int
+	err     error
+}
+
+func (f *fakeRules) SetEnforce(_ context.Context, on bool) error {
+	f.enforce = append(f.enforce, on)
+	return f.err
+}
+
+func (f *fakeRules) Restore(context.Context) error { f.restore++; return f.err }
+
+func TestRulesActions(t *testing.T) {
+	r := &fakeRules{}
+	h := NewHandler(state.NewStore(), Options{Rules: r})
+	if rec := post(t, h, "/api/rules/enforce", `{"enabled":false}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	if rec := post(t, h, "/api/rules/enforce", `{"enabled":true}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	if len(r.enforce) != 2 || r.enforce[0] || !r.enforce[1] {
+		t.Fatalf("enforce = %v", r.enforce)
+	}
+	if rec := post(t, h, "/api/rules/enforce", `{}`, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("missing field: status %d", rec.Code)
+	}
+	if rec := post(t, h, "/api/rules/restore", `{}`, nil); rec.Code != http.StatusAccepted || r.restore != 1 {
+		t.Fatalf("restore: status %d, %d calls", rec.Code, r.restore)
+	}
+	r.err = errors.New("mini-net-man refused")
+	if rec := post(t, h, "/api/rules/restore", `{}`, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("error: status %d", rec.Code)
+	}
+	if rec := post(t, h, "/api/rules/enforce", `{"enabled":false}`, map[string]string{"Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site: status %d", rec.Code)
+	}
+}

@@ -190,7 +190,12 @@ func (a *AP) apply(ctx context.Context, cfg config.Config) error {
 	if e != nil {
 		return e
 	}
-	if e = cfg.Save(a.path); e != nil {
+	// Change only the access point's settings in the file, so a setting
+	// changed from another card meanwhile is not undone.
+	if _, e = config.Modify(a.path, func(c *config.Config) {
+		c.WiFi = cfg.WiFi
+		c.Network.DHCPStart, c.Network.DHCPEnd = cfg.Network.DHCPStart, cfg.Network.DHCPEnd
+	}); e != nil {
 		return fmt.Errorf("save %s: %w", a.path, e)
 	}
 	// Restarting hostapd drops the Wi-Fi clients, including whoever is using

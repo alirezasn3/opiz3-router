@@ -34,7 +34,11 @@ type Syncer struct {
 	client *Client
 	store  *state.Store
 
-	mu         sync.Mutex
+	mu sync.Mutex
+	// enforce: put back whatever differs from the router's setup. When off,
+	// the setup is only made once, on a mini-net-man that has none of it.
+	enforce    bool
+	seeded     bool // the check for an existing setup has been made since enforce was turned off
 	lan        bool
 	lanKnown   bool
 	baseline   bool // sysctl and tuning have been set since mini-net-man was last unreachable
@@ -50,7 +54,31 @@ type Syncer struct {
 }
 
 func NewSyncer(cfg config.Config, client *Client, store *state.Store) *Syncer {
-	return &Syncer{cfg: cfg, client: client, store: store, kick: make(chan struct{}, 1)}
+	return &Syncer{cfg: cfg, client: client, store: store, enforce: cfg.MiniNetMan.Enforce, kick: make(chan struct{}, 1)}
+}
+
+// Enforcing reports whether the router puts mini-net-man's rules back.
+func (s *Syncer) Enforcing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enforce
+}
+
+// SetEnforce turns enforcing on or off. Turning it on makes the next sync put
+// everything back. Turning it off leaves the rules as they are.
+func (s *Syncer) SetEnforce(on bool) {
+	s.mu.Lock()
+	s.enforce, s.seeded = on, false
+	s.mu.Unlock()
+	s.Kick()
+}
+
+// Restore puts mini-net-man's rules back to the router's setup once, whether
+// or not it is enforcing.
+func (s *Syncer) Restore(ctx context.Context) (Changes, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.applyLocked(ctx, true)
 }
 
 // Apply makes mini-net-man's config match the router's. It is safe to call
@@ -58,10 +86,12 @@ func NewSyncer(cfg config.Config, client *Client, store *state.Store) *Syncer {
 func (s *Syncer) Apply(ctx context.Context) (Changes, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.applyLocked(ctx)
+	return s.applyLocked(ctx, false)
 }
 
-func (s *Syncer) applyLocked(ctx context.Context) (ch Changes, err error) {
+// applyLocked syncs mini-net-man. A full sync makes every managed item equal
+// to the router's; without it only what the router needs to know is read.
+func (s *Syncer) applyLocked(ctx context.Context, restore bool) (ch Changes, err error) {
 	defer func() {
 		s.syncErr = err
 		if err == nil {
@@ -81,6 +111,21 @@ func (s *Syncer) applyLocked(ctx context.Context) (ch Changes, err error) {
 			}
 		}
 		s.lanKnown = true
+	}
+
+	full := s.enforce || restore
+	if !full && !s.seeded {
+		// Hands off, unless this mini-net-man has none of the router's
+		// setup yet: it is made once, so the router works out of the box.
+		bridges, e := listOurs[Bridge](ctx, s.client, "/api/bridges")
+		if e != nil {
+			return ch, e
+		}
+		s.seeded = true
+		full = len(bridges) == 0
+	}
+	if !full {
+		return ch, s.discover(ctx)
 	}
 	if !s.baseline {
 		if e := s.client.Do(ctx, "PUT", "/api/sysctl", map[string]any{"ip_forward": true}, nil); e != nil {
@@ -130,6 +175,35 @@ func (s *Syncer) applyLocked(ctx context.Context) (ch Changes, err error) {
 	return ch, nil
 }
 
+// discover learns which items are the router's, for reporting only.
+func (s *Syncer) discover(ctx context.Context) error {
+	ids := map[string]bool{}
+	checkID := ""
+	add := func(m map[string]string, e error) error {
+		for k, id := range m {
+			ids[id] = true
+			if k == keyVPNCheck {
+				checkID = id
+			}
+		}
+		return e
+	}
+	for _, f := range []func() (map[string]string, error){
+		func() (map[string]string, error) { return listOurs[Bridge](ctx, s.client, "/api/bridges") },
+		func() (map[string]string, error) { return listOurs[Address](ctx, s.client, "/api/addresses") },
+		func() (map[string]string, error) { return listOurs[Check](ctx, s.client, "/api/checks") },
+		func() (map[string]string, error) { return listOurs[Route](ctx, s.client, "/api/routes") },
+		func() (map[string]string, error) { return listOurs[Rule](ctx, s.client, "/api/rules") },
+		func() (map[string]string, error) { return listOurs[FirewallRule](ctx, s.client, "/api/firewall/rules") },
+	} {
+		if e := add(f()); e != nil {
+			return e
+		}
+	}
+	s.ids, s.checkID = ids, checkID
+	return nil
+}
+
 func keyOfMeta(m Meta) string {
 	k, _ := keyOf(&m)
 	return k
@@ -164,16 +238,24 @@ func (s *Syncer) tune(ctx context.Context) {
 }
 
 // SetLAN makes the Ethernet port a bridge port (true) or an uplink (false).
+// When not enforcing, only the bridge's ports change; the rest is left alone.
 func (s *Syncer) SetLAN(ctx context.Context, lan bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, prevKnown := s.lan, s.lanKnown
 	s.lan, s.lanKnown = lan, true
-	if _, e := s.applyLocked(ctx); e != nil {
-		s.lan, s.lanKnown = prev, prevKnown
-		return e
+	var e error
+	if s.enforce {
+		_, e = s.applyLocked(ctx, false)
+	} else {
+		d := Build(s.cfg, lan)
+		_, _, e = reconcile(ctx, s.client, "/api/bridges", d.Bridges, false)
+		s.publishLocked(ctx)
 	}
-	return nil
+	if e != nil {
+		s.lan, s.lanKnown = prev, prevKnown
+	}
+	return e
 }
 
 // Kick asks the Run loop to sync soon.
@@ -193,7 +275,7 @@ func (s *Syncer) Run(ctx context.Context) {
 	for {
 		s.mu.Lock()
 		if force || s.syncErr != nil || time.Since(s.lastSync) >= resyncInterval {
-			_, _ = s.applyLocked(ctx)
+			_, _ = s.applyLocked(ctx, false)
 		} else {
 			s.publishLocked(ctx)
 		}
@@ -211,7 +293,7 @@ func (s *Syncer) Run(ctx context.Context) {
 
 // publishLocked reads mini-net-man's view and writes it into the state store.
 func (s *Syncer) publishLocked(ctx context.Context) {
-	r := state.Routing{KillSwitch: s.cfg.WireGuard.KillSwitch, SyncedAt: s.lastSync, VPN: "unknown"}
+	r := state.Routing{Enforce: s.enforce, KillSwitch: s.cfg.WireGuard.KillSwitch, SyncedAt: s.lastSync, VPN: "unknown"}
 	var statuses map[string]CheckStatus
 	var overview struct {
 		Issues []Issue `json:"issues"`

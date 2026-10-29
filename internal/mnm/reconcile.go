@@ -76,7 +76,12 @@ func reconcile[T any, P managed[T]](ctx context.Context, c *Client, path string,
 		if !ok {
 			continue
 		}
-		if _, dup := ours[k]; dup || !slices.Contains(wantKeys, k) {
+		// A second item with the same comment is a copy someone made, for
+		// example by cloning one of ours in the panel. It is theirs now.
+		if _, dup := ours[k]; dup {
+			continue
+		}
+		if !slices.Contains(wantKeys, k) {
 			stale = append(stale, &have[i])
 			continue
 		}
@@ -150,4 +155,23 @@ func reconcile[T any, P managed[T]](ctx context.Context, c *Client, path string,
 		ch.Issues = append(ch.Issues, res.Issues...)
 	}
 	return ids, ch, nil
+}
+
+// listOurs returns the id of each item under path that carries this
+// program's tag, by key, without changing anything.
+func listOurs[T any, P managed[T]](ctx context.Context, c *Client, path string) (map[string]string, error) {
+	var have []T
+	if e := c.Do(ctx, "GET", path, nil, &have); e != nil {
+		return nil, fmt.Errorf("list %s: %w", path, e)
+	}
+	out := map[string]string{}
+	for i := range have {
+		m := P(&have[i]).meta()
+		if k, ok := keyOf(m); ok {
+			if _, dup := out[k]; !dup {
+				out[k] = m.ID
+			}
+		}
+	}
+	return out, nil
 }

@@ -101,7 +101,7 @@ func (o Options) restart(say func(string, ...any)) error {
 		say("Restart it to use the new version: systemctl restart %s", o.Service)
 		return nil
 	}
-	if e := RestartService(o.Service); e != nil {
+	if e := RestartService(o.Service, false); e != nil {
 		// Not installed as a service, or not running as root: not a failed update.
 		say("Could not restart the service (%v). Restart it yourself: systemctl restart %s", e, o.Service)
 		return nil

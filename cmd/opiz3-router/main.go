@@ -206,6 +206,8 @@ func main() {
 	}
 	syncer := mnm.NewSyncer(cfg, mnm.NewClient(cfg.MiniNetMan.URL, cfg.MiniNetMan.Token), store)
 	go syncer.Run(ctx)
+	updater := update.NewManager(version, setup.ServiceName, cfg.Update.AutoCheck, store)
+	go updater.Run(ctx)
 	d.Text("syncing with mini-net-man", true)
 	d.NewLine(true)
 
