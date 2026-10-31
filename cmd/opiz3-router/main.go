@@ -222,14 +222,13 @@ func main() {
 		switcher := router.NewNetSwitcher(cfg, store, syncer)
 		go every(ctx, 10*time.Second, switcher.Publish)
 		displayCtrl := display.NewController(d, store)
-		handler := web.NewHandler(store, web.Options{
-			Username: cfg.Panel.Username,
-			Password: cfg.Panel.Password,
-			Network:  switcher,
-			Display:  displayCtrl,
-			WiFi:     setup.NewAP(cfg, *configPath),
-			Scanner:  scanner,
-		})
+		handler := web.NewHandler(store, panelOptions(cfg, *configPath, panelControls{
+			Network: switcher,
+			Display: displayCtrl,
+			Scanner: scanner,
+			Syncer:  syncer,
+			Updater: updater,
+		}))
 		go func() {
 			defer close(webDone)
 			if e := web.ListenAndServe(ctx, cfg.Panel.Listen, handler); e != nil {
