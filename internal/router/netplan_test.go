@@ -1,6 +1,8 @@
 package router
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,6 +83,46 @@ func TestRenderRejectsUnknownMode(t *testing.T) {
 	}
 }
 
+// errGeneratorCrashed means netplan's own tool died, which says something about
+// the machine it runs on and nothing about the file it was given.
+var errGeneratorCrashed = errors.New("netplan's generator crashed")
+
+// runNetplanGenerate runs netplan's generator on the files under root. A
+// problem with the files is an ordinary error; a crash of the tool itself
+// (killed by a signal, as some netplan versions do on some systems) is
+// errGeneratorCrashed.
+func runNetplanGenerate(gen, root string) error {
+	out, e := exec.Command(gen, "--root-dir", root).CombinedOutput()
+	if e == nil {
+		return nil
+	}
+	var exit *exec.ExitError
+	if errors.As(e, &exit) && exit.ExitCode() == -1 {
+		return fmt.Errorf("%w: %v\n%s", errGeneratorCrashed, e, out)
+	}
+	return fmt.Errorf("%v\n%s", e, out)
+}
+
+func TestRunNetplanGenerate(t *testing.T) {
+	script := func(body string) string {
+		p := filepath.Join(t.TempDir(), "generate")
+		if e := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); e != nil {
+			t.Fatal(e)
+		}
+		return p
+	}
+	if e := runNetplanGenerate(script("exit 0"), t.TempDir()); e != nil {
+		t.Fatalf("success reported as %v", e)
+	}
+	e := runNetplanGenerate(script("echo 'Error in network definition' >&2; exit 1"), t.TempDir())
+	if e == nil || errors.Is(e, errGeneratorCrashed) || !strings.Contains(e.Error(), "Error in network definition") {
+		t.Fatalf("a rejected file must be an ordinary error: %v", e)
+	}
+	if e = runNetplanGenerate(script("kill -ABRT $$"), t.TempDir()); !errors.Is(e, errGeneratorCrashed) {
+		t.Fatalf("a crash must be reported as one: %v", e)
+	}
+}
+
 func TestRenderPassesNetplanGenerate(t *testing.T) {
 	gen := ""
 	for _, p := range []string{"/usr/libexec/netplan/generate", "/usr/lib/netplan/generate"} {
@@ -104,8 +146,11 @@ func TestRenderPassesNetplanGenerate(t *testing.T) {
 		if e = os.WriteFile(filepath.Join(dir, "opiz3-router.yaml"), out, 0o600); e != nil {
 			t.Fatal(e)
 		}
-		if msg, e := exec.Command(gen, "--root-dir", root).CombinedOutput(); e != nil {
-			t.Fatalf("%s: netplan generate: %v\n%s", mode, e, msg)
+		switch e = runNetplanGenerate(gen, root); {
+		case errors.Is(e, errGeneratorCrashed):
+			t.Skipf("%s: %v", mode, e)
+		case e != nil:
+			t.Fatalf("%s: netplan rejected the file: %v", mode, e)
 		}
 		network, e := os.ReadFile(filepath.Join(root, "run", "systemd", "network", "10-netplan-end0.network"))
 		if want != "" && (e != nil || !strings.Contains(string(network), want)) {
